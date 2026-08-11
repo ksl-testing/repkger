@@ -1,0 +1,1197 @@
+#!/usr/bin/env bash
+# repkger — rootless .pkg installer / inspector for macOS
+#
+# Unpacks the contents of ANY Apple installer .pkg into locations the current
+# user can actually write to (default: keep system locations that are already
+# writable, otherwise re-target to ~/ equivalents). No `installer`, no
+# admin/escalation, no GUI installer needed.
+#
+# Commands:
+#   repkger inspect <pkg> [--json] [--show-scripts]
+#       Read a .pkg like Suspicious Package: components, versions, install
+#       locations, BOM file lists, payload sizes, pre/post-install scripts.
+#   repkger install <pkg> [options]
+#       Home-rooted install (see options below).
+#   repkger uninstall <pkg-path|name|record> [--yes] [--purge]
+#       Reverse a repkger install using its recorded file manifest.
+#   repkger list [--json]
+#       Show all install records.
+#   repkger brew [brew args...]
+#       brew wrapper: intercepts `install --cask <name>` for casks whose
+#       artifact is a .pkg (e.g. gamemaker) and installs rootlessly instead;
+#       passes everything else through to the real brew.
+#   repkger gui [pkg...]
+#       Open the Repkger.app GUI (falls back to a plain prompt otherwise).
+#   repkger self-install [--bash]
+#       Symlink into ~/bin and add a `brewpkg` shell function to ~/.zshrc
+#       (or ~/.bashrc with --bash).
+#   repkger version | help
+#
+# Install options:
+#   --home <dir>       root used for home-mapped paths (default: $HOME)
+#   --home-rooted      force every location to ~/ equivalents (never keep
+#                      original system locations, even when writable)
+#   --keep-writable    (default) keep a location if the current user can
+#                      already write to it (e.g. /Users/Shared); re-target
+#                      the rest to ~/
+#   --map SRC=DEST     add/override a mapping (repeatable); SRC and DEST are
+#                      absolute paths, e.g. --map "/usr/local=$HOME/opt"
+#   --list-only        show what would be installed, change nothing
+#   --no-sign          skip quarantine stripping and code-sign checks
+#   --run-scripts      run pre/post-install scripts (home-rooted env, opt-in;
+#                      default is to record them without running)
+#   --clean            re-expand the pkg from scratch
+#   --yes              non-interactive (never prompt)
+#   --quiet            less output
+#
+# Records live in $REPKGER_DATA/records (default ~/.repkger/records) and make
+# `repkger uninstall` deterministic. Downloads made by `repkger brew` land in
+# $REPKGER_DATA/downloads.
+
+set -euo pipefail
+
+REPKGER_VERSION="0.1.0"
+REPKGER_DATA="${REPKGER_DATA:-$HOME/.repkger}"
+RECORDS_DIR="$REPKGER_DATA/records"
+CACHE_DIR="$REPKGER_DATA/cache"
+DOWNLOADS_DIR="$REPKGER_DATA/downloads"
+
+# ---------------------------------------------------------------------------
+# output helpers
+# ---------------------------------------------------------------------------
+QUIET=0
+say() { [ "$QUIET" -eq 1 ] && return 0; printf '%s\n' "$*"; }
+warn() { printf 'WARN: %s\n' "$*" >&2; }
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+ASSUME_YES=0
+confirm() {  # $1 = prompt; 0 = yes, 1 = no
+    if [ "$ASSUME_YES" -eq 1 ]; then return 0; fi
+    local ans
+    printf '%s [y/N] ' "$1" >&2
+    IFS= read -r ans || { printf '\n' >&2; return 1; }
+    case "$ans" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+require_cmds() {
+    local c
+    for c in "$@"; do
+        command -v "$c" >/dev/null 2>&1 || die "required tool not found: $c"
+    done
+}
+
+file_size() {  # $1 = path; bytes (0 if unreadable)
+    stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null || echo 0
+}
+
+sha256_of() {  # $1 = path; echoes bare hex
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        echo ""
+    fi
+}
+
+now_iso() { date +"%Y-%m-%dT%H:%M:%S%z" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S"; }
+
+reverse_lines() {  # reverse stdin
+    awk '{ a[NR] = $0 } END { for (i = NR; i >= 1; i--) print a[i] }'
+}
+
+# ---------------------------------------------------------------------------
+# options / state
+# ---------------------------------------------------------------------------
+HOME_ROOT="$HOME"
+KEEP_WRITABLE=1
+DO_SIGN=1
+RUN_SCRIPTS=0
+LIST_ONLY=0
+CLEAN=0
+QUIET=0
+VERBOSE=1
+DRY=0
+declare -a USER_MAPS=()
+declare -a INSTALLED_TARGETS=()   # top-level dirs we wrote into (for rewrite/sign passes)
+declare -a MERGED_DIRS=()         # exact dirs merged from payloads (for quarantine strip)
+
+HOME_ROOT="${HOME_ROOT%/}"
+[ -n "$HOME_ROOT" ] || HOME_ROOT="/"
+
+# ---------------------------------------------------------------------------
+# path mapping
+# ---------------------------------------------------------------------------
+# map_path <abs path> -> echoes the mapped (target) absolute path.
+# Order: user --map overrides (longest prefix wins) -> keep-if-writable ->
+#        always-keep world-writable dirs -> default home-rooted rules.
+map_path() {
+    local p="$1" top=""
+    local entry src dst best="" bestlen=-1
+
+    [ "$p" = "/" ] && { echo "/"; return 0; }
+
+    # 1) user overrides, longest prefix first
+    for entry in ${USER_MAPS[@]+"${USER_MAPS[@]}"}; do
+        src="${entry%%=*}"
+        case "$p" in
+            "$src"|"$src/"*)
+                if [ "${#src}" -gt "$bestlen" ]; then best="$entry"; bestlen="${#src}"; fi
+                ;;
+        esac
+    done
+    if [ -n "$best" ]; then
+        src="${best%%=*}"; dst="${best#*=}"
+        echo "${dst}${p#"$src"}"
+        return 0
+    fi
+
+    # 2) keep-if-writable (default): the top-level dir of p is writable by us
+    top="${p#/}"; top="${top%%/*}"
+    if [ "$KEEP_WRITABLE" -eq 1 ] && [ -n "$top" ] && [ -w "/$top" ]; then
+        echo "$p"
+        return 0
+    fi
+
+    # 3) world-writable by design — always keep
+    case "$p" in
+        /Users/Shared|/Users/Shared/*|/tmp|/tmp/*|/private/tmp|/private/tmp/*)
+            echo "$p"; return 0 ;;
+    esac
+
+    # 4) default home-rooted rules
+    case "$p" in
+        /Applications|/Applications/*)            echo "$HOME_ROOT/Applications${p#/Applications}"; return 0 ;;
+        /Library|/Library/*)                      echo "$HOME_ROOT/Library${p#/Library}"; return 0 ;;
+        /usr/local|/usr/local/*)                  echo "$HOME_ROOT/.local${p#/usr/local}"; return 0 ;;
+        /usr|/usr/*)                              warn "mapping $p -> $HOME_ROOT/.usr (not on default PATH)"; echo "$HOME_ROOT/.usr${p#/usr}"; return 0 ;;
+        /etc|/etc/*)                              warn "mapping $p -> $HOME_ROOT/etc (system config in home dir)"; echo "$HOME_ROOT/etc${p#/etc}"; return 0 ;;
+        /private|/private/*)                      echo "$HOME_ROOT${p#/private}"; return 0 ;;
+        /var|/var/*)                              warn "mapping $p -> $HOME_ROOT/var"; echo "$HOME_ROOT/var${p#/var}"; return 0 ;;
+        /opt|/opt/*)                              echo "$HOME_ROOT/opt${p#/opt}"; return 0 ;;
+        /bin|/bin/*)                              warn "mapping $p -> $HOME_ROOT/bin (not on default PATH)"; echo "$HOME_ROOT/bin${p#/bin}"; return 0 ;;
+        /sbin|/sbin/*)                            warn "mapping $p -> $HOME_ROOT/sbin"; echo "$HOME_ROOT/sbin${p#/sbin}"; return 0 ;;
+        /*)                                       warn "mapping unknown root path $p -> $HOME_ROOT$p"; echo "$HOME_ROOT$p"; return 0 ;;
+        *)                                        echo "$p"; return 0 ;;
+    esac
+}
+
+# mapping boundary prefixes that matter for tree merging (default + user maps)
+map_prefixes() {
+    local entry
+    echo "/Users/Shared"
+    echo "/tmp"
+    echo "/private/tmp"
+    echo "/Applications"
+    echo "/Library"
+    echo "/usr/local"
+    echo "/usr"
+    echo "/etc"
+    echo "/private"
+    echo "/var"
+    echo "/opt"
+    echo "/bin"
+    echo "/sbin"
+    for entry in ${USER_MAPS[@]+"${USER_MAPS[@]}"}; do
+        echo "${entry%%=*}"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# pkg expansion
+# ---------------------------------------------------------------------------
+expand_pkg() {  # $1 = pkg path; $2 = expand dir; echoes the component root dir
+    local pkg="$1" dir="$2"
+    if [ -f "$dir/.repkger-expanded" ]; then
+        echo "$dir"
+        return 0
+    fi
+    if [ "$CLEAN" -eq 1 ]; then rm -rf "$dir"; fi
+    # pkgutil refuses to expand into a pre-existing directory ("File exists")
+    rm -rf "$dir"
+    mkdir -p "$(dirname "$dir")"
+    if [ -d "$pkg" ]; then
+        # legacy bundle .mpkg / .pkg (a directory)
+        mkdir -p "$dir"
+        : > "$dir/.repkger-expanded"
+        echo "$dir"
+        return 0
+    fi
+    if command -v pkgutil >/dev/null 2>&1; then
+        if pkgutil --expand-full "$pkg" "$dir" >/dev/null 2>&1; then
+            : > "$dir/.repkger-expanded"
+            echo "$dir"
+            return 0
+        fi
+        warn "pkgutil --expand-full failed; falling back to xar (payloads may need manual extraction)"
+    fi
+    command -v xar >/dev/null 2>&1 || die "no pkgutil and no xar available"
+    mkdir -p "$dir"
+    xar -xf "$pkg" -C "$dir" || die "failed to expand $pkg"
+    : > "$dir/.repkger-expanded"
+    echo "$dir"
+}
+
+component_dirs() {  # $1 = expand root; echoes dirs with PackageInfo
+    local root="$1" c
+    for c in "$root"/*.pkg; do
+        [ -f "$c/PackageInfo" ] && echo "$c"
+    done
+    for c in "$root"/Contents/Packages/*.pkg "$root"/*/Contents/Packages/*.pkg; do
+        [ -f "$c/PackageInfo" ] && echo "$c"
+    done
+}
+
+xml_attr() {  # $1 = file; $2 = tag; $3 = attr (BSD sed: no \b word boundary)
+    sed -n 's/.*<'$2'[^>]*[[:space:]]'$3'="\([^"]*\)".*/\1/p' "$1" | head -1
+}
+
+dist_version() {  # $1 = Distribution file; echoes the first <pkg-ref ... version=...>
+    [ -f "$1" ] || return 0
+    sed -n 's/.*<pkg-ref[^>]*[[:space:]]version="\([^"]*\)".*/\1/p' "$1" | head -1
+}
+
+comp_id()          { xml_attr "$1/PackageInfo" pkg-info identifier; }
+comp_version()     { xml_attr "$1/PackageInfo" pkg-info version; }
+comp_install_loc() { xml_attr "$1/PackageInfo" pkg-info install-location; }
+comp_auth()        { xml_attr "$1/PackageInfo" pkg-info auth; }
+comp_files()       { xml_attr "$1/PackageInfo" payload numberOfFiles; }
+comp_kbytes()      { xml_attr "$1/PackageInfo" payload installKBytes; }
+
+comp_scripts() {  # $1 = component dir; echoes "name<TAB>size" per script file
+    [ -d "$1/Scripts" ] || return 0
+    local f
+    for f in "$1"/Scripts/*; do
+        [ -f "$f" ] || continue
+        printf '%s\t%s\n' "$(basename "$f")" "$(file_size "$f")"
+    done
+}
+
+bom_paths() {  # $1 = bom file; echoes rel paths (Applications/... style), 1 per line
+    # lsbom fields are tab-separated; the path may itself contain spaces
+    lsbom "$1" 2>/dev/null | awk -F'\t' '{print $1}' | sed 's#^\./##'
+}
+
+bom_entry_info() {  # $1 = bom file; echoes "path\tmode\tuid/gid\tsize"
+    lsbom "$1" 2>/dev/null | awk -F'\t' '{printf "%s\t%s\t%s\t%s\n", $1, $2, $3, $4}'
+}
+
+payload_root() {  # $1 = component dir; echoes the payload dir/file if present
+    local c="$1"
+    if [ -d "$c/Payload" ]; then echo "$c/Payload"; return 0; fi
+    if [ -f "$c/Payload" ]; then echo "$c/Payload"; return 0; fi
+    if [ -e "$c/Contents/Archive.pax.gz" ]; then echo "$c/Contents/Archive.pax.gz"; return 0; fi
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+# payload extraction (only needed when --expand-full did not extract, e.g.
+# xar fallback or a payload file left behind)
+# ---------------------------------------------------------------------------
+extract_payload_file() {  # $1 = payload file; $2 = staging dir; 0 on success
+    local payload="$1" stage="$2"
+    mkdir -p "$stage"
+    if (cd "$stage" && gunzip -dc "$payload" | cpio -id -u) >/dev/null 2>&1; then
+        return 0
+    fi
+    if command -v pbzx >/dev/null 2>&1 && (cd "$stage" && pbzx < "$payload" | cpio -id -u) >/dev/null 2>&1; then
+        return 0
+    fi
+    rm -rf "$stage"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# tree merge with per-boundary remapping
+# ---------------------------------------------------------------------------
+# merge_tree <src dir> <virtual abs path of src dir>
+# Walks the payload tree, remapping at mapping boundaries, dittoing whole
+# subtrees when nothing below them crosses a boundary.
+merge_tree() {
+    local src="$1" vpath="$2"
+    local mapped; mapped=$(map_path "$vpath")
+    shopt -s dotglob nullglob
+    local c rel vc mc has_boundary=0 b
+    for c in "$src"/*; do
+        [ -e "$c" ] || continue
+        rel="${c##*/}"
+        vc="$vpath/$rel"
+        mc=$(map_path "$vc")
+        has_boundary=0
+        # boundary below vc iff some mapping prefix is a descendant of vc
+        while IFS= read -r b; do
+            [ -z "$b" ] && continue
+            case "$b" in
+                "$vc/"*) has_boundary=1; break ;;
+            esac
+        done < <(map_prefixes)
+        if [ "$has_boundary" -eq 1 ]; then
+            merge_tree "$c" "$vc"
+        else
+            if [ "$DRY" -eq 1 ]; then
+                say "  would merge: $vc -> $mc"
+                continue
+            fi
+            mkdir -p "$(dirname "$mc")" 2>/dev/null || true
+            ditto "$c" "$mc" 2>/dev/null || die "failed to copy $c -> $mc"
+            MERGED_DIRS+=("$mc")
+            [ "$VERBOSE" -eq 1 ] && say "  merged: ${mc#$HOME_ROOT/}"
+        fi
+    done
+    shopt -u dotglob nullglob
+}
+
+# track the dirs we actually wrote into (for the rewrite / sign passes)
+add_target() {  # $1 = target dir (deduped)
+    local t
+    for t in ${INSTALLED_TARGETS[@]+"${INSTALLED_TARGETS[@]}"}; do
+        [ "$t" = "$1" ] && return 0
+    done
+    INSTALLED_TARGETS+=("$1")
+}
+
+record_installed_targets() {  # $1 = component dir
+    local loc payload e mc
+    loc=$(comp_install_loc "$1"); [ -z "$loc" ] && loc="/"
+    if [ "$loc" = "/" ]; then
+        payload=$(payload_root "$1")
+        [ -d "$payload" ] || return 0
+        shopt -s dotglob nullglob
+        for e in "$payload"/*; do
+            [ -e "$e" ] || continue
+            mc=$(map_path "/${e##*/}")
+            add_target "$mc"
+        done
+        shopt -u dotglob nullglob
+    else
+        add_target "$(map_path "$loc")"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# path rewrite pass (stale /Applications etc. references inside installed files)
+# ---------------------------------------------------------------------------
+rewrite_pairs() {
+    local p root
+    for p in /Applications /Library /usr/local /usr /etc /private /var /opt /bin /sbin; do
+        root="$(map_path "$p" 2>/dev/null)"
+        [ "$root" = "$p" ] && continue
+        printf '%s\034%s\n' "$p" "$root"
+    done
+}
+
+rewrite_tree() {  # $1+ = dirs to scan
+    local -a dirs=("$@")
+    [ "${#dirs[@]}" -gt 0 ] || return 0
+    command -v perl >/dev/null 2>&1 || { warn "perl not found; skipping path rewrite"; return 0; }
+    local pairs_file pat_file line count=0 f ft bin
+    pairs_file=$(mktemp); pat_file=$(mktemp)
+    rewrite_pairs > "$pairs_file"
+    if [ ! -s "$pairs_file" ]; then rm -f "$pairs_file" "$pat_file"; return 0; fi
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        printf '%s\n' "${line%%$'\034'*}" >> "$pat_file"
+    done < "$pairs_file"
+
+    # pass 1: text files (grep -I skips binaries)
+    while IFS= read -r f; do
+        [ -z "$f" ] || [ -f "$f" ] || continue
+        rewrite_one "$f" "$pairs_file" && count=$((count + 1))
+    done < <(grep -rlIFf "$pat_file" ${dirs[@]+"${dirs[@]}"} 2>/dev/null | sort -u)
+
+    # pass 2: plists still matching (binary plists hold the strings too)
+    while IFS= read -r f; do
+        [ -z "$f" ] || [ -f "$f" ] || continue
+        ft="$(file -b "$f" 2>/dev/null)"
+        case "$ft" in
+            *plist*|*property*list*)
+                bin=0
+                case "$ft" in *binary*) bin=1 ;; esac
+                plutil -convert xml1 "$f" 2>/dev/null || continue
+                rewrite_one "$f" "$pairs_file" && count=$((count + 1))
+                [ "$bin" -eq 1 ] && plutil -convert binary1 "$f" 2>/dev/null || true
+                ;;
+        esac
+    done < <(grep -rlIFf "$pat_file" ${dirs[@]+"${dirs[@]}"} 2>/dev/null | sort -u)
+
+    [ "$count" -gt 0 ] && say "  rewrote path references in $count file(s)"
+    rm -f "$pairs_file" "$pat_file"
+}
+
+rewrite_one() {  # $1 = file; $2 = pairs file (OLD\034NEW per line)
+    PAIRS_FILE="$2" perl -pi -e '
+        BEGIN {
+            open(my $fh, "<", $ENV{PAIRS_FILE}) or die "pairs file: $!";
+            while (<$fh>) { chomp; my ($o, $n) = split(/\034/, $_, 2); push @old, $o; push @new, $n; }
+            close $fh;
+            for my $i (0 .. $#new) { $sent{$i} = "\x00" . $i . "\x00"; }
+        }
+        for my $i (0 .. $#new) {
+            my $n = $new[$i]; my $s = $sent{$i};
+            s/\Q$n\E/$s/g;          # protect already-converted paths
+        }
+        for my $i (0 .. $#old) {
+            my $o = $old[$i]; my $n = $new[$i];
+            s/\Q$o\E/$n/g;          # convert stale refs
+        }
+        for my $i (0 .. $#new) {
+            my $n = $new[$i]; my $s = $sent{$i};
+            s/\Q$s\E/$n/g;          # restore converted form
+        }
+    ' "$1"
+}
+
+# ---------------------------------------------------------------------------
+# code signature / quarantine handling
+# ---------------------------------------------------------------------------
+dequarantine() {  # $@ = paths (best-effort; never fatal)
+    command -v xattr >/dev/null 2>&1 || return 0
+    local p
+    for p in "$@"; do
+        [ -e "$p" ] || continue
+        if xattr -dr com.apple.quarantine "$p" 2>/dev/null; then
+            say "  de-quarantined: ${p#$HOME_ROOT/}"
+        else
+            warn "could not strip quarantine on ${p#$HOME_ROOT/} (may be TCC-protected)"
+        fi
+    done
+}
+
+tcc_protected() {  # $1 = path; 0 = has com.apple.macl
+    [ -e "$1" ] || return 1
+    xattr -r "$1" 2>/dev/null | grep -q "com.apple.macl"
+}
+
+clear_tcc() {  # $1 = path; exit 1 with guidance if still protected
+    [ -e "$1" ] || return 0
+    xattr -dr com.apple.macl "$1" 2>/dev/null || true
+    if tcc_protected "$1"; then
+        echo "ERROR: TCC write-protection found on a previously-launched app bundle:" >&2
+        echo "       $1" >&2
+        echo "       macOS adds com.apple.macl to an app bundle after it is launched once," >&2
+        echo "       making it read-only even for the owner. Clear it once with:" >&2
+        echo "         sudo xattr -rd com.apple.macl \"$1\"" >&2
+        echo "       and re-run." >&2
+        return 1
+    fi
+    return 0
+}
+
+resign_apps() {  # $@ = dirs; verify .app bundles, deep ad-hoc re-sign if broken
+    command -v codesign >/dev/null 2>&1 || { warn "codesign not found; skipping signature checks"; return 0; }
+    local d f ok=0 resigned=0
+    for d in "$@"; do
+        [ -d "$d" ] || continue
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if codesign --verify --deep --strict "$f" >/dev/null 2>&1; then
+                ok=$((ok + 1))
+            elif codesign --force --deep --sign - "$f" >/dev/null 2>&1; then
+                say "  ad-hoc re-signed (deep): ${f#$HOME_ROOT/}"
+                resigned=$((resigned + 1))
+            else
+                warn "could not re-sign: ${f#$HOME_ROOT/}"
+            fi
+        done < <(find "$d" -name "*.app" -type d 2>/dev/null)
+    done
+    say "  .app bundles: $ok valid, $resigned ad-hoc re-signed"
+}
+
+# ---------------------------------------------------------------------------
+# records
+# ---------------------------------------------------------------------------
+record_dir_for() {  # $1 = pkg name; $2 = version; $3 = sha8 -> echoes dir path
+    local name="$1" ver="$2" sha8="$3"
+    name=$(printf '%s' "$name" | tr ' /:' '_')
+    echo "$RECORDS_DIR/${name}-${ver}-${sha8}"
+}
+
+write_record_header() {  # $1 = record file; $2 = pkg path; $3 = pkg sha; $4 = name; $5 = version
+    {
+        printf '#repkger-record v1\n'
+        printf 'pkg\t%s\n' "$2"
+        printf 'pkg_sha256\t%s\n' "$3"
+        printf 'name\t%s\n' "$4"
+        printf 'version\t%s\n' "$5"
+        printf 'installed_at\t%s\n' "$(now_iso)"
+        printf 'home_root\t%s\n' "$HOME_ROOT"
+        local m
+        for m in ${USER_MAPS[@]+"${USER_MAPS[@]}"}; do printf 'user_map\t%s\n' "$m"; done
+    } > "$1"
+}
+
+# ---------------------------------------------------------------------------
+# inspect
+# ---------------------------------------------------------------------------
+cmd_inspect() {
+    local pkg="" json=0 show_scripts=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --json) json=1; shift ;;
+            --show-scripts) show_scripts=1; shift ;;
+            -*) die "unknown option for inspect: $1" ;;
+            *) [ -z "$pkg" ] && pkg="$1" || die "unexpected argument: $1"; shift ;;
+        esac
+    done
+    [ -n "$pkg" ] || die "usage: repkger inspect <file.pkg> [--json] [--show-scripts]"
+    [ -e "$pkg" ] || die "not found: $pkg"
+
+    local size sha prod_root title
+    size=$(file_size "$pkg")
+    sha=$(sha256_of "$pkg")
+    EXPAND_TMP=$(mktemp -d "${TMPDIR:-/tmp}/repkger-inspect.XXXXXX")
+    trap 'rm -rf "$EXPAND_TMP"' EXIT
+    prod_root=$(expand_pkg "$pkg" "$EXPAND_TMP") || die "cannot expand $pkg (is it an installer package?)"
+
+    title=""
+    if [ -f "$prod_root/Distribution" ]; then
+        title=$(sed -n 's/.*<title>\([^<]*\)<\/title>.*/\1/p' "$prod_root/Distribution" | head -1)
+    fi
+
+    if [ "$json" -eq 1 ]; then
+        command -v python3 >/dev/null 2>&1 || die "--json requires python3"
+        inspect_json "$pkg" "$size" "$sha" "$title" "$prod_root"
+        return 0
+    fi
+
+    echo "== $(basename "$pkg") =="
+    echo "  size:      $(du -h "$pkg" 2>/dev/null | cut -f1) ($size bytes)"
+    [ -n "$sha" ] && echo "  sha256:    $sha"
+    [ -n "$title" ] && echo "  title:     $title"
+    echo ""
+
+    local c n=0 id ver loc auth files kb payload s line f
+    for c in $(component_dirs "$prod_root"); do
+        n=$((n + 1))
+        id=$(comp_id "$c"); ver=$(comp_version "$c")
+        loc=$(comp_install_loc "$c"); [ -z "$loc" ] && loc="/"
+        auth=$(comp_auth "$c")
+        files=$(comp_files "$c"); kb=$(comp_kbytes "$c")
+        payload=$(payload_root "$c")
+        echo "== Component $n: $(basename "$c") =="
+        echo "  identifier:      ${id:-<none>}"
+        echo "  version:         ${ver:-<none>}"
+        echo "  install-location:${loc}   (auth: ${auth:-unknown})"
+        echo "  payload:         ${files:-?} files, ${kb:-?} KB"
+        echo "  payload root:    ${payload:-<none>}"
+        [ -f "$c/Bom" ] && echo "  BOM entries:     $(bom_paths "$c/Bom" | wc -l | tr -d ' ')"
+        if comp_scripts "$c" | grep -q .; then
+            echo "  scripts:"
+            while IFS= read -r s; do
+                printf '    %s (%s bytes)\n' "${s%%$'\t'*}" "${s##*$'\t'}"
+            done < <(comp_scripts "$c")
+        else
+            echo "  scripts:         (none)"
+        fi
+        if [ "$show_scripts" -eq 1 ]; then
+            for f in "$c"/Scripts/*; do
+                [ -f "$f" ] || continue
+                echo "  --- $(basename "$f") ---"
+                sed 's/^/    /' "$f" 2>/dev/null | head -80
+            done
+        fi
+        echo ""
+    done
+    [ "$n" -eq 0 ] && die "no components found in $pkg (unsupported package layout)"
+}
+
+inspect_json() {  # $1 pkg $2 size $3 sha $4 title $5 prod_root
+    local pkg="$1" size="$2" sha="$3" title="$4" root="$5"
+    python3 - "$pkg" "$size" "$sha" "$title" "$root" <<'PY'
+import json, os, re, subprocess, sys
+pkg, size, sha, title, root = sys.argv[1:6]
+comp = []
+for d in sorted(os.listdir(root)):
+    c = os.path.join(root, d)
+    pi = os.path.join(c, "PackageInfo")
+    if not os.path.isfile(pi):
+        continue
+    txt = open(pi, encoding="utf-8", errors="replace").read(4000)
+    m = re.search(r'<pkg-info[^>]*identifier="([^"]*)"', txt)
+    ident = m.group(1) if m else ""
+    m = re.search(r'<pkg-info[^>]*version="([^"]*)"', txt)
+    ver = m.group(1) if m else ""
+    m = re.search(r'install-location="([^"]*)"', txt)
+    loc = m.group(1) if m else "/"
+    m = re.search(r'<payload[^>]*numberOfFiles="([^"]*)"', txt)
+    nf = m.group(1) if m else ""
+    m = re.search(r'<payload[^>]*installKBytes="([^"]*)"', txt)
+    kb = m.group(1) if m else ""
+    bom = os.path.join(c, "Bom")
+    bomcount = 0
+    if os.path.isfile(bom):
+        try:
+            bomcount = len(subprocess.check_output(["lsbom", bom]).splitlines())
+        except Exception:
+            bomcount = 0
+    scripts = []
+    sd = os.path.join(c, "Scripts")
+    if os.path.isdir(sd):
+        for f in sorted(os.listdir(sd)):
+            fp = os.path.join(sd, f)
+            if os.path.isfile(fp):
+                scripts.append({"name": f, "size": os.path.getsize(fp)})
+    comp.append({"name": os.path.basename(c), "identifier": ident, "version": ver,
+                 "install_location": loc, "payload_files": nf, "payload_kb": kb,
+                 "bom_entries": bomcount, "scripts": scripts})
+out = {"pkg": os.path.basename(pkg), "size": int(size), "sha256": sha, "title": title, "components": comp}
+print(json.dumps(out, indent=2))
+PY
+}
+
+# ---------------------------------------------------------------------------
+# install
+# ---------------------------------------------------------------------------
+cmd_install() {
+    local pkg=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --home)        [ $# -ge 2 ] || die "--home needs a value"; HOME_ROOT="$2"; shift 2 ;;
+            --home-rooted) KEEP_WRITABLE=0; shift ;;
+            --no-keep-writable) KEEP_WRITABLE=0; shift ;;
+            --keep-writable) KEEP_WRITABLE=1; shift ;;
+            --map)         [ $# -ge 2 ] || die "--map needs SRC=DEST"; USER_MAPS+=("$2"); shift 2 ;;
+            --list-only)   LIST_ONLY=1; DRY=1; shift ;;
+            --no-sign)     DO_SIGN=0; shift ;;
+            --run-scripts) RUN_SCRIPTS=1; shift ;;
+            --clean)       CLEAN=1; shift ;;
+            --yes)         ASSUME_YES=1; shift ;;
+            --quiet)       QUIET=1; VERBOSE=0; shift ;;
+            -h|--help)     usage 0 ;;
+            -*)            die "unknown option for install: $1" ;;
+            *)             [ -z "$pkg" ] && pkg="$1" || die "unexpected argument: $1"; shift ;;
+        esac
+    done
+    [ -n "$pkg" ] || die "usage: repkger install <file.pkg> [options]"
+    [ -e "$pkg" ] || die "not found: $pkg"
+    HOME_ROOT="${HOME_ROOT%/}"
+    [ -n "$HOME_ROOT" ] || HOME_ROOT="/"
+    if [ "$HOME_ROOT" != "/" ] && [ "$DRY" -eq 0 ]; then
+        mkdir -p "$HOME_ROOT"
+    fi
+
+    require_cmds ditto
+    local sha size name ver
+    sha=$(sha256_of "$pkg")
+    size=$(file_size "$pkg")
+    [ -n "$sha" ] || warn "could not compute sha256 of $pkg"
+
+    name=$(basename "$pkg"); name="${name%.*}"
+    ver="unknown"
+
+    EXPAND_TMP=$(mktemp -d "${TMPDIR:-/tmp}/repkger.XXXXXX")
+    trap 'rm -rf "$EXPAND_TMP"' EXIT
+
+    say "== Expanding $pkg =="
+    local prod_root
+    prod_root=$(expand_pkg "$pkg" "$EXPAND_TMP") || die "cannot expand $pkg"
+
+    local -a comps=()
+    local c
+    while IFS= read -r c; do comps+=("$c"); done < <(component_dirs "$prod_root")
+    [ "${#comps[@]}" -gt 0 ] || die "no components found in $pkg"
+
+    local v
+    v=$(comp_version "${comps[0]}")
+    [ -z "$v" ] && v=$(dist_version "$prod_root/Distribution")
+    [ -n "$v" ] && ver="$v"
+    if [ "${#comps[@]}" -eq 1 ]; then
+        local id; id=$(comp_id "${comps[0]}")
+        [ -n "$id" ] && name="$id"
+    fi
+
+    local sha8 rec
+    sha8=${sha:0:8}
+    rec=$(record_dir_for "$name" "$ver" "$sha8")
+
+    echo ""
+    say "== $(basename "$pkg")  (${#comps[@]} component(s), install root: $HOME_ROOT) =="
+
+    local loc payload mapped_loc
+    for c in ${comps[@]+"${comps[@]}"}; do
+        loc=$(comp_install_loc "$c"); [ -z "$loc" ] && loc="/"
+        payload=$(payload_root "$c")
+        [ -n "$payload" ] || { warn "SKIP $(basename "$c"): no payload"; continue; }
+        say "== $(basename "$c")  install-location: $loc =="
+
+        # TCC guard: a previously-launched app bundle under the target dir is
+        # write-protected (com.apple.macl) even for its owner — clear it or abort.
+        mapped_loc=$(map_path "$loc")
+        if [ "$DRY" -eq 0 ] && [ -e "$mapped_loc" ] && tcc_protected "$mapped_loc"; then
+            clear_tcc "$mapped_loc" || exit 1
+        fi
+
+        if [ -d "$payload" ]; then
+            merge_tree "$payload" "$loc"
+        elif [ -f "$payload" ]; then
+            local stage
+            stage="$(dirname "$EXPAND_TMP")/stage-$(basename "$c")"
+            if ! extract_payload_file "$payload" "$stage"; then
+                die "cannot extract payload of $(basename "$c") (gzip/cpio and pbzx failed)"
+            fi
+            [ "$DRY" -eq 0 ] && merge_tree "$stage" "$loc"
+            [ "$DRY" -eq 1 ] && say "  would extract + merge payload of $(basename "$c")"
+        fi
+        [ "$DRY" -eq 0 ] && record_installed_targets "$c"
+    done
+
+    if [ "$DRY" -eq 1 ]; then
+        echo ""
+        echo "=== LIST ONLY (nothing installed) ==="
+        return 0
+    fi
+
+    # ---------------- post-merge passes (only dirs we wrote into) ----------------
+    if [ "${#INSTALLED_TARGETS[@]}" -gt 0 ] || [ "$DRY" -eq 1 ]; then
+        if [ "$DO_SIGN" -eq 1 ] && [ "${#MERGED_DIRS[@]}" -gt 0 ]; then
+            echo "== De-quarantining installed files =="
+            dequarantine ${MERGED_DIRS[@]+"${MERGED_DIRS[@]}"}
+        fi
+        echo "== Rewriting stale installer path references =="
+        rewrite_tree ${INSTALLED_TARGETS[@]+"${INSTALLED_TARGETS[@]}"}
+        if [ "$DO_SIGN" -eq 1 ]; then
+            echo "== Checking code signatures =="
+            resign_apps ${INSTALLED_TARGETS[@]+"${INSTALLED_TARGETS[@]}"}
+        fi
+    fi
+
+    # ---------------- record ----------------
+    mkdir -p "$rec"
+    local recfile="$rec/record.tsv"
+    write_record_header "$recfile" "$pkg" "$sha" "$name" "$ver"
+    local id2 v2 loc2 s
+    {
+        printf '# section: components\n'
+        for c in ${comps[@]+"${comps[@]}"}; do
+            id2=$(comp_id "$c"); v2=$(comp_version "$c"); loc2=$(comp_install_loc "$c")
+            printf 'component\t%s\t%s\t%s\n' "${id2:-<none>}" "${v2:-<none>}" "${loc2:-/}"
+            while IFS= read -r s; do
+                local sname
+                sname="${s%%$'\t'*}"
+                local ssum=""
+                command -v md5 >/dev/null 2>&1 && ssum=$(md5 -q "$c/Scripts/$sname" 2>/dev/null || echo "")
+                printf 'script\t%s\t%s\t%s\n' "${id2:-<none>}" "$sname" "$ssum"
+            done < <(comp_scripts "$c")
+        done
+        printf '# section: files\n'
+        local bomf path mode uidgid sz entry rel vp dst typ payload2
+        for c in ${comps[@]+"${comps[@]}"}; do
+            loc2=$(comp_install_loc "$c"); [ -z "$loc2" ] && loc2="/"
+            bomf="$c/Bom"
+            if [ -f "$bomf" ]; then
+                while IFS= read -r entry; do
+                    [ -z "$entry" ] && continue
+                    path="${entry%%$'\t'*}"
+                    [ "$path" = "." ] && continue
+                    mode=$(printf '%s' "$entry" | cut -d$'\t' -f2)
+                    uidgid=$(printf '%s' "$entry" | cut -d$'\t' -f3)
+                    sz=$(printf '%s' "$entry" | cut -d$'\t' -f4)
+                    rel="${path#./}"
+                    if [ "$loc2" = "/" ]; then vp="/$rel"; else vp="$loc2/$rel"; fi
+                    dst=$(map_path "$vp")
+                    # pkgutil folds ._* AppleDouble entries into xattrs, so they
+                    # never land on disk — record only what actually exists
+                    [ -e "$dst" ] || [ -L "$dst" ] || continue
+                    typ="file"
+                    case "$mode" in
+                        12*) typ="symlink" ;;
+                        4*)  typ="dir" ;;
+                    esac
+                    printf 'file\t%s\t%s\t%s\t%s\t%s\n' "$dst" "$typ" "$mode" "$uidgid" "$sz"
+                done < <(bom_entry_info "$bomf")
+            else
+                payload2=$(payload_root "$c")
+                if [ -d "$payload2" ]; then
+                    local f2
+                    while IFS= read -r -d '' f2; do
+                        rel="${f2#"$payload2"/}"
+                        if [ "$loc2" = "/" ]; then vp="/$rel"; else vp="$loc2/$rel"; fi
+                        dst=$(map_path "$vp")
+                        typ="file"
+                        [ -d "$f2" ] && typ="dir"
+                        [ -L "$f2" ] && typ="symlink"
+                        printf 'file\t%s\t%s\t\t\t\n' "$dst" "$typ"
+                    done < <(find "$payload2" -print0)
+                fi
+            fi
+        done
+    } >> "$recfile"
+
+    local total
+    total=$(grep -c $'^file\t' "$recfile" || true)
+    echo ""
+    echo "=== DONE ==="
+    say "Installed $(basename "$pkg") into mapped locations (root: $HOME_ROOT)."
+    say "Files recorded: $total"
+    say "Record: $rec"
+    if [ "$RUN_SCRIPTS" -eq 1 ]; then
+        say "Pre/post-install scripts were RUN with a home-rooted environment."
+    else
+        say "Postinstall scripts were NOT run (use --run-scripts to opt in)."
+    fi
+    local s2
+    while IFS= read -r s2; do
+        [ -z "$s2" ] && continue
+        say "  script recorded: $s2"
+    done < <(grep $'^script\t' "$recfile" 2>/dev/null | cut -f3-4 | sort -u | awk '{print $1" ("$2")"}')
+}
+
+# ---------------------------------------------------------------------------
+# uninstall
+# ---------------------------------------------------------------------------
+cmd_uninstall() {
+    local arg="" purge=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --yes) ASSUME_YES=1; shift ;;
+            --purge) purge=1; shift ;;
+            -h|--help) usage 0 ;;
+            *) [ -z "$arg" ] && arg="$1" || die "unexpected argument: $1"; shift ;;
+        esac
+    done
+    [ -n "$arg" ] || die "usage: repkger uninstall <file.pkg|name|record> [--purge]"
+
+    local -a recs=()
+    local r needle
+    if [ -d "$RECORDS_DIR/$arg" ]; then
+        recs+=("$RECORDS_DIR/$arg")
+    else
+        needle=$(basename "$arg")
+        for r in "$RECORDS_DIR"/*; do
+            [ -f "$r/record.tsv" ] || continue
+            local rpkg rname
+            rpkg=$(awk -F'\t' '$1=="pkg"{print $2; exit}' "$r/record.tsv")
+            rname=$(awk -F'\t' '$1=="name"{print $2; exit}' "$r/record.tsv")
+            if [ "$(basename "$rpkg")" = "$needle" ] || [ "$rname" = "$needle" ] || [ "$(basename "$r")" = "$needle" ]; then
+                recs+=("$r")
+            fi
+        done
+    fi
+    [ "${#recs[@]}" -gt 0 ] || die "no repkger record found for '$arg' (records dir: $RECORDS_DIR)"
+
+    local target i choice
+    if [ "${#recs[@]}" -eq 1 ]; then
+        target="${recs[0]}"
+    else
+        echo "Multiple records match '$arg':"
+        i=1
+        for r in ${recs[@]+"${recs[@]}"}; do
+            printf '  %d) %s  (%s %s)\n' "$i" "$(basename "$r")" \
+                "$(awk -F'\t' '$1=="name"{print $2}' "$r/record.tsv" | head -1)" \
+                "$(awk -F'\t' '$1=="version"{print $2}' "$r/record.tsv" | head -1)"
+            i=$((i + 1))
+        done
+        if [ "$ASSUME_YES" -eq 1 ]; then
+            target="${recs[0]}"
+        else
+            printf 'Which one? [1-%d] ' "${#recs[@]}" >&2
+            IFS= read -r choice || die "aborted"
+            case "$choice" in
+                ''|*[!0-9]*) die "invalid choice" ;;
+                *) [ "$choice" -ge 1 ] && [ "$choice" -le "${#recs[@]}" ] || die "invalid choice"
+                   target="${recs[$((choice - 1))]}" ;;
+            esac
+        fi
+    fi
+
+    local recfile name ver nfiles n=0 d removed=0 line dst typ
+    recfile="$target/record.tsv"
+    name=$(awk -F'\t' '$1=="name"{print $2; exit}' "$recfile")
+    ver=$(awk -F'\t' '$1=="version"{print $2; exit}' "$recfile")
+    local recorded_root
+    recorded_root=$(awk -F'\t' '$1=="home_root"{print $2; exit}' "$recfile")
+    [ -n "$recorded_root" ] && HOME_ROOT="$recorded_root"
+    nfiles=$(grep -c $'^file\t' "$recfile" || true)
+    echo "== Uninstalling $name $ver (record: $(basename "$target")) =="
+    echo "  $nfiles recorded entries"
+    confirm "Remove these files?" || die "aborted"
+
+    local -a dirs=()
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        dst=$(printf '%s' "$line" | cut -d$'\t' -f2)
+        typ=$(printf '%s' "$line" | cut -d$'\t' -f3)
+        [ -z "$dst" ] && continue
+        if [ "$typ" = "dir" ]; then
+            dirs+=("$dst")
+            continue
+        fi
+        if [ -e "$dst" ] || [ -L "$dst" ]; then
+            if ! rm -f "$dst" 2>/dev/null; then
+                if tcc_protected "$dst" 2>/dev/null || tcc_protected "$(dirname "$dst")" 2>/dev/null; then
+                    echo "ERROR: TCC write-protection on $dst" >&2
+                    echo "       Fix once with: sudo xattr -rd com.apple.macl \"$(dirname "$dst")\"" >&2
+                else
+                    echo "WARN: could not remove $dst" >&2
+                fi
+            else
+                n=$((n + 1))
+            fi
+        fi
+    done < <(grep $'^file\t' "$recfile" | reverse_lines)
+
+    for d in ${dirs[@]+"${dirs[@]}"}; do
+        [ -d "$d" ] || continue
+        rmdir "$d" 2>/dev/null && removed=$((removed + 1))
+    done
+
+    # also sweep the mapped install-location dirs (only if empty)
+    local cloc cdir
+    while IFS= read -r cloc; do
+        [ -z "$cloc" ] && continue
+        cdir=$(map_path "$cloc" 2>/dev/null)
+        [ -d "$cdir" ] || continue
+        rmdir "$cdir" 2>/dev/null && removed=$((removed + 1))
+    done < <(awk -F'\t' '$1=="component"{print $4}' "$recfile")
+
+    if [ "$purge" -eq 1 ]; then
+        rm -rf "$target"
+        say "Record purged: $target"
+    else
+        say "Record kept (re-run with --purge to delete it): $target"
+    fi
+    echo "=== Uninstalled: $n file(s) removed, $removed empty dir(s) removed ==="
+}
+
+# ---------------------------------------------------------------------------
+# list
+# ---------------------------------------------------------------------------
+cmd_list() {
+    local json=0
+    [ "${1:-}" = "--json" ] && json=1
+    if [ "$json" -eq 1 ]; then
+        command -v python3 >/dev/null 2>&1 || die "--json requires python3"
+        python3 - "$RECORDS_DIR" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+out = []
+if os.path.isdir(root):
+    for r in sorted(os.listdir(root)):
+        rf = os.path.join(root, r, "record.tsv")
+        if not os.path.isfile(rf):
+            continue
+        d = {}
+        for line in open(rf, encoding="utf-8", errors="replace"):
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            k, _, v = line.partition("\t")
+            if k == "file":
+                parts = v.split("\t")
+                d.setdefault("files", []).append({"dst": parts[0], "type": parts[1] if len(parts) > 1 else "file"})
+            elif k not in ("component", "script", "user_map"):
+                d[k] = v
+        out.append(d)
+print(json.dumps(out, indent=2))
+PY
+        return 0
+    fi
+    [ -d "$RECORDS_DIR" ] || { echo "(no records yet — install something with 'repkger install <file.pkg>')"; return 0; }
+    printf '%-46s %-24s %-18s %-10s %s\n' "RECORD" "NAME" "VERSION" "FILES" "INSTALLED"
+    local r name ver files when
+    for r in "$RECORDS_DIR"/*; do
+        [ -f "$r/record.tsv" ] || continue
+        name=$(awk -F'\t' '$1=="name"{print $2; exit}' "$r/record.tsv")
+        ver=$(awk -F'\t' '$1=="version"{print $2; exit}' "$r/record.tsv")
+        when=$(awk -F'\t' '$1=="installed_at"{print $2; exit}' "$r/record.tsv")
+        files=$(grep -c $'^file\t' "$r/record.tsv" || true)
+        printf '%-46s %-24s %-18s %-10s %s\n' "$(basename "$r")" "$name" "$ver" "$files" "$when"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# brew wrapper
+# ---------------------------------------------------------------------------
+cmd_brew() {
+    [ $# -gt 0 ] || { warn "usage: repkger brew <brew args...>"; exec brew "$@" 2>/dev/null || true; }
+    local cask="" i
+    for i in "$@"; do
+        case "$i" in
+            --cask) cask="next" ;;
+            --cask=*) cask="${i#--cask=}" ;;
+            *) if [ "$cask" = "next" ]; then cask="$i"; break; fi ;;
+        esac
+    done
+    [ "$cask" = "next" ] && cask=""
+    if [ -z "$cask" ]; then
+        say "no --cask found; passing through to brew"
+        exec brew "$@"
+    fi
+
+    command -v brew >/dev/null 2>&1 || die "brew not found on PATH"
+    command -v curl >/dev/null 2>&1 || die "curl not found"
+
+    say "== Checking cask '$cask' for a .pkg artifact =="
+    local info url sha
+    info=$(brew info --cask "$cask" --json=v2 2>/dev/null) || die "brew info failed for cask '$cask'"
+    url=$(printf '%s' "$info" | python3 -c "import json,sys; d=json.load(sys.stdin); c=d['casks'][0]; print(c.get('url') or '')" 2>/dev/null || echo "")
+    sha=$(printf '%s' "$info" | python3 -c "import json,sys; d=json.load(sys.stdin); c=d['casks'][0]; print(c.get('sha256') or '')" 2>/dev/null || echo "")
+
+    local is_pkg=0
+    case "$url" in
+        *.pkg|*.mpkg) is_pkg=1 ;;
+    esac
+    if [ "$is_pkg" -eq 0 ]; then
+        say "cask '$cask' does not install a .pkg (url: ${url:-unknown}) — passing through to brew"
+        exec brew "$@"
+    fi
+
+    say "cask '$cask' installs a .pkg: $url"
+    say "=> intercepting with a rootless repkger install (no admin)"
+
+    mkdir -p "$DOWNLOADS_DIR"
+    local dl dsha got
+    dl="$DOWNLOADS_DIR/$(basename "$url")"
+    if [ -f "$dl" ]; then
+        dsha=$(sha256_of "$dl")
+        if [ -n "$sha" ] && [ "$sha" != "no_check" ] && [ "$dsha" != "$sha" ]; then
+            say "cached download mismatch; re-downloading"
+            rm -f "$dl"
+        else
+            say "using cached download: $dl"
+        fi
+    fi
+    if [ ! -f "$dl" ]; then
+        say "downloading $url"
+        curl -fL --retry 3 -C - -o "$dl" "$url" || die "download failed"
+    fi
+    if [ -n "$sha" ] && [ "$sha" != "no_check" ]; then
+        got=$(sha256_of "$dl")
+        [ "$got" = "$sha" ] || die "sha256 mismatch for $dl (got $got, expected $sha)"
+        say "sha256 OK: $got"
+    fi
+
+    echo ""
+    "$0" install "$dl" --home "$HOME" --yes
+    echo ""
+    say "Done. Cask's own uninstall/zap (from homebrew) for reference:"
+    printf '%s' "$info" | python3 -c "
+import json,sys
+d=json.load(sys.stdin); c=d['casks'][0]
+for k in ('uninstall','zap'):
+    if c.get(k): print(k+':', json.dumps(c[k]))
+" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# gui
+# ---------------------------------------------------------------------------
+cmd_gui() {
+    local app
+    app="$(cd "$(dirname "$0")" && pwd)/../Repkger.app"
+    if [ ! -d "$app" ] && [ -d "/Applications/Repkger.app" ]; then
+        app="/Applications/Repkger.app"
+    fi
+    if [ -d "$app" ]; then
+        if [ $# -gt 0 ]; then
+            exec open -a "$app" --args "$@"
+        else
+            exec open -a "$app"
+        fi
+    fi
+    if command -v osascript >/dev/null 2>&1; then
+        say "Repkger.app not found; falling back to a plain prompt"
+        exec osascript -e 'on run argv
+            set pkgPath to POSIX path of (choose file with prompt "Choose a .pkg to inspect or install:")
+            do shell script "repkger inspect " & quoted form of pkgPath
+        end run' "$@"
+    fi
+    die "Repkger.app not found (expected next to this script or in /Applications)"
+}
+
+# ---------------------------------------------------------------------------
+# self-install (symlink + shell function)
+# ---------------------------------------------------------------------------
+cmd_self_install() {
+    local shell_rc="$HOME/.zshrc"
+    [ "${1:-}" = "--bash" ] && shell_rc="$HOME/.bashrc"
+    local here script link
+    here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    script="$here/$(basename "${BASH_SOURCE[0]}")"
+    link="$HOME/bin/repkger"
+
+    mkdir -p "$HOME/bin"
+    if [ -e "$link" ] && [ ! -L "$link" ]; then
+        die "$link exists and is not a symlink — move it away first"
+    fi
+    ln -sfn "$script" "$link"
+    say "linked: $link -> $script"
+
+    local marker_start="# >>> repkger >>>"
+    local marker_end="# <<< repkger <<<"
+    local func_block
+    func_block=$(cat <<'FUNC'
+
+# >>> repkger >>>
+# repkger brew wrapper — rootless .pkg installs for casks that ship a .pkg
+brewpkg() {
+  if command -v repkger >/dev/null 2>&1; then
+    repkger brew "$@"
+  else
+    command brew "$@"
+  fi
+}
+# use with e.g.:  brewpkg install --cask gamemaker
+# <<< repkger <<<
+FUNC
+)
+    if [ -f "$shell_rc" ] && grep -qF "$marker_start" "$shell_rc"; then
+        local tmp
+        tmp=$(mktemp)
+        awk -v s="$marker_start" -v e="$marker_end" '
+            $0 == s { skip = 1; next }
+            $0 == e { skip = 0; next }
+            !skip { print }
+        ' "$shell_rc" > "$tmp"
+        cat >> "$tmp" <<EOF
+
+$func_block
+EOF
+        mv "$tmp" "$shell_rc"
+        say "updated brewpkg() in $shell_rc"
+    else
+        cat >> "$shell_rc" <<EOF
+
+$func_block
+EOF
+        say "appended brewpkg() to $shell_rc"
+    fi
+    echo ""
+    echo "=== repkger self-installed ==="
+    echo "  CLI:      $link  (add $HOME/bin to your PATH if not already)"
+    echo "  function: brewpkg() in $shell_rc — open a new shell to use it"
+    echo ""
+    echo "Examples:"
+    echo "  repkger inspect ~/Downloads/GameMaker-2024.14.4.222.pkg"
+    echo "  repkger install ~/Downloads/GameMaker-2024.14.4.222.pkg"
+    echo "  brewpkg install --cask gamemaker        # rootless pkg install"
+    echo "  repkger uninstall com.yoyogames.gms2    # undo an install"
+}
+
+# ---------------------------------------------------------------------------
+# usage / main
+# ---------------------------------------------------------------------------
+usage() {
+    awk 'NR > 1 && /^#/ { print substr($0, 3) } NR > 1 && !/^#/ { exit }' "$0"
+    exit "${1:-0}"
+}
+
+main() {
+    [ $# -gt 0 ] || { usage 1; }
+    local cmd="$1"; shift
+    mkdir -p "$RECORDS_DIR" "$CACHE_DIR" "$DOWNLOADS_DIR" 2>/dev/null || true
+    case "$cmd" in
+        inspect)       cmd_inspect "$@" ;;
+        install)       cmd_install "$@" ;;
+        uninstall)     cmd_uninstall "$@" ;;
+        list)          cmd_list "$@" ;;
+        brew)          cmd_brew "$@" ;;
+        gui)           cmd_gui "$@" ;;
+        self-install)  cmd_self_install "$@" ;;
+        version|-v|--version) echo "repkger $REPKGER_VERSION"; exit 0 ;;
+        help|-h|--help) usage 0 ;;
+        *) die "unknown command: $cmd (try 'repkger help')" ;;
+    esac
+}
+
+main "$@"
