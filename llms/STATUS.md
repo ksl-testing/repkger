@@ -1,33 +1,70 @@
-# STATUS — 2026-08-10
+# STATUS — 2026-08-11 (v0.2.0)
 
 ## Done & validated
-- CLI commands: `inspect`, `install`, `uninstall`, `list`, `brew`, `gui` (stub),
-  `self-install`, `version` — single file `bin/repkger` (bash 3.2-compatible).
-- Full round-trip validated on **GameMaker 2024.14.4.222.pkg**:
-  - `inspect`: title/component/identifier/version/install-location/BOM(17,480)/scripts shown.
-  - `install --home /tmp/repkger-home-test`: `~/Applications`-equivalent merge,
-    33 stale refs rewritten, 1 bundle ad-hoc re-signed, 9,327 files recorded.
-  - `install` (default `$HOME`): `~/Applications/GameMaker.app` created.
-  - `uninstall`: 8,235 files + 1,093 dirs removed; tree back to 1 entry.
-- Paths with spaces parse correctly (awk `-F'\t'` fix).
-- pkg sha256 verified `8cbd33a9…cc7f` (matches upstream homebrew cask).
+- CLI commands: `inspect` (+ `--json`, `--show-scripts`, `--files [N]`),
+  `install`, `uninstall`, `list`, `brew`, `gui`, `self-install`, `version` —
+  single file `bin/repkger` (bash 3.2-compatible).
+- **Scope bug fixed**: rewrite + resign operate only on the package's own
+  landed files (BOM-driven `INSTALLED_FILES`); validated with a decoy app
+  pre-placed in a scratch home — untouched.
+- **Rewrite rewrite**: single-pass longest-prefix token rewrite; verified
+  byte-correct on nested refs (`/usr/local/bin`, `/usr/bin:/bin`,
+  `/private/var`, `/Library/Application Support`, `--prefix=`), idempotent.
+- **Quarantine**: merged targets + mapped install-location dirs stripped
+  recursively; each one's parent dir stripped non-recursively
+  (`xattr -dr com.apple.quarantine`, fallback `-c`/`-cr` clear-all). Verified
+  against a quarantined scratch `~/Applications`.
+- **GUI `Repkger.app`** built (`build/Repkger.app`): droplet with Inspect /
+  Install / Uninstall flows, embedded CLI, doc types, ad-hoc signed;
+  headless `--install/--inspect` verified end-to-end via osascript.
+- **Synthetic fixture** (`test/make-fixture.sh`, 3.7 KB pkg): full
+  install → uninstall round-trip (25 files recorded incl. `_CodeSignature`,
+  all reversed; `/Users/Shared` + `/tmp` kept in place and cleaned).
+- pkg sha256 GameMaker `8cbd33a9…cc7f` (matches upstream homebrew cask) was
+  verified at v0.1.0; fixture re-testing covers the loop since.
 
-## Broken / needs attention (CRITICAL)
-- **Scope bug in rewrite + codesign passes**: they operate on
-  `INSTALLED_TARGETS` (the whole mapped install-location dir), so a real
-  install into `$HOME` rewrote `/Applications`/`/Library`/`/bin`/`/usr/local`
-  references inside OTHER apps in `~/Applications` and ad-hoc re-signed 10
-  bundles (original vendor signatures lost for Suspicious Package, Platypus,
-  Autodesk Fusion, FamiStudio).
-- Damage reversal is NOT yet done (survey was interrupted mid-run). See
-  `llms.md` → "TODO first" for the exact reverse-rewrite commands and the
-  re-sign / reinstall guidance.
-- The fix is to run rewrite+resign only on the package's own files:
-  rewrite over the **record file list**, resign over `MERGED_DIRS` only.
+## Fixed incidental bugs (v0.2.0)
+- Single-component pkgs expanding with `PackageInfo` at the root were
+  "unsupported layout" (component_dirs now checks the root).
+- install-location `/` produced `//Applications` paths, which silently broke
+  keep-in-place for `/Users/Shared` + `/tmp` and made the TCC guard walk `/`.
+- `comp_scripts | grep -q` SIGPIPE under `pipefail` hid scripts in inspect;
+  `inspect` also exited 1 spuriously.
+- `_CodeSignature` dirs created by ad-hoc signing weren't recorded →
+  uninstall left them behind.
+
+## Outstanding
+- Historical v0.1.0 `~/Applications` damage on this machine not yet reversed
+  (tool can no longer cause it). See `llms.md` → "Old v0.1.0 damage reversal".
+- **Release pipeline + brew tap written and locally validated** (see below)
+  but not yet live: everything is uncommitted, so nothing has been pushed and
+  no GitHub release / tap exists yet. First publish steps in
+  `llms/ROADMAP.md` → item 5.
+- Repkger.app has no custom icon / notarization / progress UI.
+- Tap casks: the `famistudio` cask is DONE and live at **4.5.3** (rootless
+  .NET cask with apphost menu-name fix, de-quarantine self-heal,
+  settings/autosave symlinks, daily livecheck — upgrade verified: settings
+  ini byte-identical after `brew upgrade --cask famistudio`). Still open:
+  `Casks/repkger.rb` (GUI) + rootless `Casks/gamemaker.rb`.
+
+## Release pipeline (new in this session, validated locally)
+- `.github/workflows/release.yml`: push to `main` (paths: bin/gui/scripts/
+  tap/test/workflow) or `workflow_dispatch` → test (fixture round-trip 28
+  checks + GUI smoke) → build (`make-app.sh`, CLI zip, app zip, SHA256SUMS)
+  → publish/refresh release `v<REPKGER_VERSION>` with assets →
+  `scripts/update-tap.sh` updates `ksl-testing/homebrew-tap`. Manual
+  re-trigger: `gh workflow run build-release.yml` (works from mobile).
+- `scripts/update-tap.sh` renders `tap/repkgr.rb` (+ `repkger.rb` alias) with
+  the release URL + sha256, clones or creates the tap repo, commits, pushes.
+- Validated: workflow YAML parses; `bash -n` all scripts; `test/roundtrip.sh`
+  28/28; generated formulas pass `brew style` (0 offenses), `brew install`
+  and `brew test` via a throwaway local tap (then untapped, no residue).
+- To activate: commit + push, add `TAP_TOKEN` secret, then
+  `brew install ksl-testing/tap/repkgr`.
 
 ## Housekeeping notes
-- `~/Downloads/repkger-test/` holds the downloaded pkg + an expanded copy
-  (`expanded/`) — free to delete; re-downloadable.
-- `~/.repkger/records/` holds the real-install record for GameMaker.
-- The `Repkger.app` GUI does NOT exist yet — only the `gui` CLI stub.
-- No git repo existed for this project before this commit; this push is the first.
+- `test/make-fixture.sh` builds the fast fixture (`/tmp/repkger-fixture/mini.pkg`);
+  `build/Repkger.app` is gitignored-worthy (generated).
+- `~/Downloads/repkger-test/` (GameMaker fixture) was deleted to save space;
+  re-downloadable.
+- `~/.repkger/records/` holds the real-install GameMaker record from v0.1.0.

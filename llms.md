@@ -1,8 +1,8 @@
 # repkger — LLM handoff doc (read this first)
 
-> Written 2026-08-10. Purpose: let a **cacheless LLM** (or a human) pick up this
-> project in ≤5 minutes. Everything below is the current truth; re-read files
-> before editing (they may have changed).
+> Written 2026-08-10, updated 2026-08-11 (v0.2.0). Purpose: let a **cacheless
+> LLM** (or a human) pick up this project in ≤5 minutes. Everything below is
+> the current truth; re-read files before editing (they may have changed).
 
 ## What this project is
 
@@ -10,11 +10,14 @@ A macOS tool that installs Apple installer `.pkg` files **without admin / sudo /
 `installer` / the pkg GUI**. It re-targets every install path to somewhere the
 current user can write (`~/Applications`, `~/Library`, `~/.local`, ...), keeps
 world-writable locations (`/Users/Shared`) in place, rewrites stale absolute
-path references inside installed files, records exactly what landed, and can
-reverse it. It also inspects `.pkg` files the way *Suspicious Package* does
-(components, BOM file lists, scripts, versions). A `brew` wrapper intercepts
+path references inside installed files, strips `com.apple.quarantine` from each
+target **and its parent dir**, records exactly what landed, and can reverse it.
+It also inspects `.pkg` files the way *Suspicious Package* does (components, BOM
+file lists, scripts, versions) — including a `--files` view of where each BOM
+entry will land after re-mapping. A `brew` wrapper intercepts
 `brew install --cask <name>` for casks that ship a `.pkg` (e.g. `gamemaker`)
-and installs them rootlessly.
+and installs them rootlessly. A GUI droplet app (`build/Repkger.app`) wraps the
+inspect + install + uninstall flows.
 
 Origin: generalization of the CSP_Mac project's `install_portable.sh`
 (`~/Documents/GitHub/CSP_Mac`), which did the same thing for one specific pkg.
@@ -22,113 +25,86 @@ Origin: generalization of the CSP_Mac project's `install_portable.sh`
 ## Repo layout
 
 ```
-bin/repkger        # the whole CLI — single bash script (macOS bash 3.2 compatible)
-README.md          # overview + quick start
-llms.md            # THIS FILE — handoff
-llms/STATUS.md     # detailed status + the open damage-reversal task
-llms/ROADMAP.md    # GUI .app, brew integration, tap integration
-NOTES.md           # dev notes: architecture, validated behavior, gotchas
+bin/repkger             # the whole CLI — single bash script (macOS bash 3.2 compatible)
+gui/Repkger.applescript # the GUI droplet source (osacompile target)
+scripts/make-app.sh     # builds build/Repkger.app from the droplet + CLI + metadata
+test/make-fixture.sh    # builds a tiny synthetic mini.pkg for the fast test loop
+README.md               # overview + quick start
+llms.md                 # THIS FILE — handoff
+llms/STATUS.md          # detailed status + remaining work
+llms/ROADMAP.md         # GUI .app, brew integration, tap integration
+NOTES.md                # dev notes: architecture, validated behavior, gotchas
 ```
 
-## Status (2026-08-10)
+## Status (2026-08-11, v0.2.0)
 
 ### DONE + validated
-- `bin/repkger` CLI: `inspect`, `install`, `uninstall`, `list`, `brew`, `gui`
-  (stub), `self-install`, `version`.
-- Validated end-to-end against **GameMaker-2024.14.4.222.pkg**
-  (`~/Downloads/repkger-test/`): inspect shows correct components/BOM/scripts;
-  install → `~/Applications/GameMaker.app` (9,327 files recorded, 33 files
-  rewritten, 1 bundle ad-hoc re-signed); uninstall → fully reversed (8,235
-  files + 1,093 dirs). pkg sha256 `8cbd33a9...` matches upstream cask.
-- `--list-only` dry run works. Record/uninstall round-trip works
-  (incl. paths with spaces after the `awk -F'\t'` fix).
-- Known-good fixtures to re-test against (fast):
-  - `~/Downloads/repkger-test/GameMaker-2024.14.4.222.pkg` (430 MB)
-  - scratch home: `--home /tmp/repkger-home-test --yes` + `REPKGER_DATA=/tmp/repkger-data`
+- CLI: `inspect` (+ `--json`, `--show-scripts`, `--files [N]`), `install`,
+  `uninstall`, `list`, `brew`, `gui`, `self-install`, `version`.
+- **Rewrite/resign scope bug FIXED.** Rewrite + resign now operate only on the
+  package's own landed files (BOM-driven `INSTALLED_FILES` list); dequarantine
+  covers merged dirs + mapped install-location dirs. Validated with a decoy app
+  pre-placed in a scratch `~/Applications`: it is never touched.
+- **Rewrite nesting bug FIXED.** One perl pass with longest-prefix alternation
+  that consumes the whole reference token: `/usr/local/bin` → `~/.local/bin`,
+  `/usr/bin:/bin` PATH lists remap both, `/private/var` → `~/var`,
+  `/Library/Application Support/...` spaces preserved, `--prefix=/usr/local/x`
+  works, and re-running is a no-op (idempotent).
+- **Quarantine parent handling.** `strip_quarantine` removes
+  `com.apple.quarantine` (`xattr -dr`, recursive on targets; non-recursive on
+  each target's parent dir so future copies don't re-inherit); if `-d` fails
+  while the attr is present it falls back to clearing all xattrs (`-c`/`-cr`).
+  Never walks `/` or `$HOME_ROOT` recursively.
+- **GUI `Repkger.app` exists** (`build/Repkger.app`): droplet with
+  `on open droppedItems`, mode chooser (Inspect / Install / Uninstall),
+  Suspicious-Package-style inspect dialog with "Full Report" + "Install"
+  buttons, headless `--install <pkg> [--home dir] [--data dir]` /
+  `--inspect <pkg>` modes, embedded CLI in `Contents/Resources/repkger`,
+  bundle id `com.ksl-testing.repkger`, `.pkg`/`.mpkg` doc types, ad-hoc
+  signed. `repkger gui` finds it in `build/`, repo root, `~/Applications`,
+  or `/Applications`.
+- Fixed pre-existing bugs found along the way: single-component packages that
+  expand with `PackageInfo` at the root (component_dirs now checks the root),
+  `//` double-slash paths when install-location is `/` (which also broke
+  keep-in-place for `/Users/Shared` + `/tmp`), SIGPIPE from `comp_scripts |
+  grep -q` under `pipefail`, trailing exit-1 in `inspect`, `tcc_protected`
+  walking the whole filesystem for install-location `/`, unrecorded
+  `_CodeSignature` artifacts (now swept into the record after signing).
+- Synthetic fixture validates everything without the 800 MB GameMaker pkg:
+  `test/make-fixture.sh` → `/tmp/repkger-fixture/mini.pkg` (single component,
+  install-location `/`, 22 BOM entries, preinstall/postinstall).
+  Round-trip verified: install (25 files recorded incl. `_CodeSignature`) →
+  uninstall → scratch home back to only the pre-placed decoy.
 
-### CRITICAL UNRESOLVED — collateral damage in ~/Applications
-The first real install (into `$HOME`) ran the **path-rewrite and codesign
-passes over the ENTIRE `~/Applications` directory** instead of only the
-package's own files, because `record_installed_targets()` adds the mapped
-install-location dir (`$HOME_ROOT/Applications`) to `INSTALLED_TARGETS`, and
-`cmd_install` passes `INSTALLED_TARGETS` to `rewrite_tree` / `resign_apps`.
+### OUTSTANDING — historical ~/Applications damage (this machine only)
+The first real install (v0.1.0) ran the rewrite pass over the whole
+`~/Applications` and ad-hoc re-signed other apps' bundles. The tool can no
+longer cause this, but the damage is not yet reversed. Reversal procedure
+(survey, reverse-rewrite, re-sign/reinstall) is in the old llms.md section
+below, still valid.
 
-Consequences on this machine (user `tpldih`):
-- Files inside other apps in `~/Applications` had these strings rewritten:
-  `/Applications` → `/Users/tpldih/Applications`, `/Library` → `/Users/tpldih/Library`,
-  `/bin` → `/Users/tpldih/bin`, `/usr/local` → `/Users/tpldih/.local`, etc.
-  Known-hit files (survey was INTERRUPTED — list incomplete):
-  - `~/Applications/FamiStudio.app/Contents/MacOS/main.command`
-  - `~/Applications/MacNdCheese Launcher.app/Contents/Resources/installer.sh`
-  - `~/Applications/MacNdCheese Launcher.app/Contents/Resources/backend_server.py`
-  - `~/Applications/MacNdCheese Launcher.app/Contents/Resources/oxrsys-runtime/oxrsys-runtime.toml`
-  - `~/Applications/Remove Autodesk Fusion.app/Contents/MacOS/Remove Autodesk Fusion`
-  - `~/Applications/Platypus.app/Contents/Resources/Documentation.html`
-  - Freebuff.app (1 file), Suspicious Package.app (3 files),
-    TPLDIH BootKit.app (18 files)
-- 10 bundles were ad-hoc re-signed (original signatures lost for vendor-signed
-  apps: Suspicious Package, Platypus, Autodesk Fusion, FamiStudio): the
-  re-signed list was Remove Autodesk Fusion, FamiStudio, MacNdCheese Launcher,
-  Platypus, Suspicious Package, Autodesk Fusion Service Utility, TPLDIH
-  BootKit, Freebuff, **GameMaker (ours — keep)**, Autodesk Fusion.
-
-#### TODO first (≤10 min): reverse the rewrite + re-sign
-1. Re-run the full damage survey (interrupted before): grep all of
-   `~/Applications` (excluding GameMaker.app) for the new-form prefixes:
-   `/Users/tpldih/Applications`, `/Users/tpldih/Library`, `/Users/tpldih/bin`,
-   `/Users/tpldih/.local`, `/Users/tpldih/.usr`, `/Users/tpldih/etc`,
-   `/Users/tpldih/var`, `/Users/tpldih/opt`, `/Users/tpldih/sbin`.
-2. For each hit file, reverse the transformation (order: longest/least-common
-   prefixes first; all are distinct children of `/Users/tpldih/` so plain
-   order works; handle binary plists via `plutil -convert xml1` before / back):
-   ```
-   perl -pi -e '
-     s{/Users/tpldih/bin/}{/bin/}g;
-     s{/Users/tpldih/sbin/}{/sbin/}g;
-     s{/Users/tpldih/\.local/}{/usr/local/}g;
-     s{/Users/tpldih/\.usr/}{/usr/}g;
-     s{/Users/tpldih/etc/}{/etc/}g;
-     s{/Users/tpldih/var/}{/var/}g;
-     s{/Users/tpldih/opt/}{/opt/}g;
-     s{/Users/tpldih/Applications/}{/Applications/}g;
-     s{/Users/tpldih/Library/}{/Library/}g' FILE
-   ```
-   CAUTION: only reverse files that were actually rewritten (contain new-form
-   strings). Verify shebangs are back to `#!/bin/...`.
-3. Re-sign affected bundles (they are ad-hoc now anyway):
-   `codesign --force --deep --sign - "PATH.app"` for each affected .app
-   (NOT GameMaker.app — it is intentionally rewritten).
-4. Consider `brew reinstall --cask suspicious-package platypus` (and famistudio
-   from ksl-testing/tap) to restore genuine vendor signatures.
-
-#### TODO second: fix the scope bug in bin/repkger (do before ANY real install)
-- `record_installed_targets()` → should add the **merged** dirs (already tracked
-  in `MERGED_DIRS`), not the whole mapped install-location dir.
-- `cmd_install` post-merge passes must operate ONLY on the package's own files:
-  - rewrite: iterate the **record file list** (paths that exist), not
-    `grep -r` over the mapped dir.
-  - resign: `resign_apps "${MERGED_DIRS[@]}"` (already merged-scope for
-    dequarantine — mirror that for rewrite + resign).
-- Re-validate with the scratch flow, then with a real `~/` install and confirm
-  no other apps' files change (`git diff`-style check of mtimes / grep before).
-
-## How to test (fast loop)
+## How to test (fast loop — no downloads needed)
 
 ```bash
-R=~/Documents/GitHub/repkger/bin/repkger
-$R inspect  ~/Downloads/repkger-test/GameMaker-2024.14.4.222.pkg
-$R install  ~/Downloads/repkger-test/GameMaker-2024.14.4.222.pkg --list-only
-rm -rf /tmp/repkger-home-test /tmp/repkger-data
-REPKGER_DATA=/tmp/repkger-data $R install ~/Downloads/repkger-test/GameMaker-2024.14.4.222.pkg --home /tmp/repkger-home-test --yes
-REPKGER_DATA=/tmp/repkger-data $R list
-REPKGER_DATA=/tmp/repkger-data $R uninstall com.yoyogames.gms2 --yes
-find /tmp/repkger-home-test | wc -l     # expect 1 (only the root)
+R=$PWD/bin/repkger
+test/make-fixture.sh                       # builds /tmp/repkger-fixture/mini.pkg
+$R inspect /tmp/repkger-fixture/mini.pkg --files 12
+rm -rf /tmp/rk-home /tmp/rk-data
+REPKGER_DATA=/tmp/rk-data $R install /tmp/repkger-fixture/mini.pkg --home /tmp/rk-home --yes
+REPKGER_DATA=/tmp/rk-data $R list
+REPKGER_DATA=/tmp/rk-data $R uninstall com.test.miniapp --yes
+find /tmp/rk-home | wc -l                  # expect 1 (only the root)
+
+# GUI headless flow (no dialogs):
+PATH="$PWD/bin:$PATH" osascript gui/Repkger.applescript --install /tmp/repkger-fixture/mini.pkg --home /tmp/rk-home --data /tmp/rk-data
+scripts/make-app.sh                        # rebuild build/Repkger.app
 ```
 
 ## Key implementation facts (gotchas learned)
 
 - `pkgutil --expand-full` **refuses a pre-existing destination dir** ("File
-  exists") — the script must `rm -rf` the target first.
+  exists") — the script must `rm -rf` the target first. A single-component pkg
+  expands with `PackageInfo` at the ROOT, not under `Contents/Packages/`.
 - macOS BSD `sed` has **no `\b`** — attribute regexes must not use it.
 - `lsbom` output is **tab-separated with spaces allowed inside the path** —
   parse with `awk -F'\t'`, never default whitespace splitting.
@@ -139,24 +115,74 @@ find /tmp/repkger-home-test | wc -l     # expect 1 (only the root)
   use `${arr[@]+"${arr[@]}"}` everywhere.
 - EXIT traps must reference **global** vars, not function-locals (locals are
   out of scope when the trap fires).
-- Don't combine `xattr ... && say` under `set -e` (silent exit on failure);
-  use `if ... then ... else warn`.
+- Don't pipe to `grep -q` under `set -o pipefail` without draining the
+  producer (SIGPIPE abort noise) — capture to a variable first.
+- `tcc_protected` must never run on `/` or `$HOME_ROOT` (`xattr -r` walks the
+  whole disk).
 - `installer manual:` in brew cask DSL does NOT run anything (just prints);
   `installer script:` runs as the current user with `reset_uid` — that's the
   rootless cask hook. `depends_on formula:` is valid in casks.
 - GameMaker pkg facts: single component `com.yoyogames.gms2` v2024.14.4.222,
-  install-location `/Applications`, preinstall is entirely commented out,
+  install-location `/Applications`, preinstall entirely commented out,
   postinstall only chmods `/Users/Shared/GameMakerStudio2` dirs + relaunches.
   Upstream cask sha256 `8cbd33a9a92ed60ebd53734413b33afdeb8c677326ada0c80971e9f91555cc7f`.
+- Rewrite must use the longest-prefix-first single-pass perl (`rewrite_one`);
+  the old protect-convert-restore multi-pass double-rewrote tails
+  (`/usr/local/bin` → `~/.local<...>/bin`).
+- macOS names the About/Hide/Quit menu items from the executable FILE name,
+  not argv[0]: `exec -a` fixes only the menu-bar title, and the dotnet muxer
+  refuses to run when renamed — the reliable fix for a .NET app's menu name is
+  a real apphost (generate via `dotnet publish` of a minimal project named
+  after the app, then `exec` it next to the app's dll + runtimeconfig).
 
 ## Next milestones (details in llms/ROADMAP.md)
 
-1. Fix scope bug + reverse ~/Applications damage (above).
-2. GUI `Repkger.app` — AppleScript droplet (`on open droppedItems`), osacompile
-   build script, embedded CLI in Resources, document types for .pkg.
-3. Brew integration: `repkger brew` already coded; add `Formula/repkger.rb` +
-   `Casks/repkger.rb` + rootless `Casks/gamemaker.rb` to
-   `ksl-testing/homebrew-tap` (workspace:
-   `~/homebrew/Library/Taps/ksl-testing/homebrew-tap`).
-4. `gh repo create ksl-testing/repkger --private --source=. --push` (this
-   repo is local-only as of writing; push when ready).
+1. Reverse the historical ~/Applications damage (procedure below).
+2. ~~Brew formula pipeline~~ — DONE: `.github/workflows/release.yml` runs
+   tests, builds `Repkger.app` + CLI assets, publishes a GitHub release on
+   every `main` push (and via `gh workflow run build-release.yml`), then calls
+   `scripts/update-tap.sh` which creates/refreshes `Formula/repkgr.rb` +
+   `Formula/repkger.rb` (alias) in `ksl-testing/homebrew-tap` from the
+   `tap/*.rb` templates. Locally validated end-to-end: `brew style` clean,
+   `brew install` + `brew test` of the generated formula both pass.
+   Remaining: add the `TAP_TOKEN` PAT secret to the repo and push. The
+   `famistudio` cask is DONE (rootless .NET cask — apphost menu-name fix,
+   de-quarantine self-heal, settings/autosave symlinks, daily livecheck,
+   live at 4.5.3). Still open: `Casks/repkger.rb` (GUI) + rootless
+   `Casks/gamemaker.rb`.
+3. First publish: commit, `git push -u origin main` (workflow auto-runs),
+   add `TAP_TOKEN` (PAT, repo scope) as a repo secret so the tap update step
+   runs, then verify `brew install ksl-testing/tap/repkgr` and
+   `gh release view v0.2.0`.
+
+## Old v0.1.0 damage reversal (still pending)
+
+#### Survey (interrupted earlier — re-run before reversing)
+grep all of `~/Applications` (excluding GameMaker.app) for the new-form
+prefixes: `/Users/tpldih/Applications`, `/Users/tpldih/Library`,
+`/Users/tpldih/bin`, `/Users/tpldih/.local`, `/Users/tpldih/.usr`,
+`/Users/tpldih/etc`, `/Users/tpldih/var`, `/Users/tpldih/opt`,
+`/Users/tpldih/sbin`.
+
+#### Reverse (only files that actually contain new-form strings; longest /
+least-common prefixes first; binary plists via `plutil -convert xml1` first):
+```bash
+perl -pi -e '
+  s{/Users/tpldih/bin/}{/bin/}g;
+  s{/Users/tpldih/sbin/}{/sbin/}g;
+  s{/Users/tpldih/\.local/}{/usr/local/}g;
+  s{/Users/tpldih/\.usr/}{/usr/}g;
+  s{/Users/tpldih/etc/}{/etc/}g;
+  s{/Users/tpldih/var/}{/var/}g;
+  s{/Users/tpldih/opt/}{/opt/}g;
+  s{/Users/tpldih/Applications/}{/Applications/}g;
+  s{/Users/tpldih/Library/}{/Library/}g' FILE
+```
+CAUTION: only reverse files that were actually rewritten; verify shebangs back
+to `#!/bin/...`.
+
+#### Re-sign affected bundles
+`codesign --force --deep --sign - "PATH.app"` for each affected .app (NOT
+GameMaker.app — it is intentionally rewritten). Prefer
+`brew reinstall --cask suspicious-package platypus` (and famistudio from
+ksl-testing/tap) to restore genuine vendor signatures.

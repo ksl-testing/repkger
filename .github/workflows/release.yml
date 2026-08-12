@@ -1,0 +1,169 @@
+name: build-release
+
+# Every push to main that touches repkger sources triggers: tests -> build ->
+# publish a GitHub release with downloadable assets (.app zip, CLI zip, raw
+# script, checksums) -> refresh the ksl-testing/homebrew-tap formula so
+# `brew install ksl-testing/tap/repkgr` gets the new build.
+#
+# Manual re-trigger (works from gh CLI, the GitHub web UI, or the mobile app):
+#   gh workflow run build-release.yml
+# or: repo -> Actions -> "build-release" -> Run workflow.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bin/**'
+      - 'gui/**'
+      - 'scripts/**'
+      - 'tap/**'
+      - 'test/**'
+      - '.github/workflows/release.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'bin/**'
+      - 'gui/**'
+      - 'scripts/**'
+      - 'tap/**'
+      - 'test/**'
+  workflow_dispatch: {}
+
+# Serialize release runs: a second trigger waits instead of racing the first.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax checks
+        run: |
+          bash -n bin/repkger scripts/make-app.sh scripts/update-tap.sh test/make-fixture.sh test/roundtrip.sh
+
+      - name: Fixture install -> uninstall round-trip
+        run: bash test/roundtrip.sh
+
+      - name: GUI build smoke test
+        run: |
+          bash scripts/make-app.sh
+          B=build/Repkger.app
+          test -x "$B/Contents/MacOS/applet"
+          test -x "$B/Contents/Resources/repkger"
+          "$B/Contents/Resources/repkger" version
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$B/Contents/Info.plist"
+
+  build:
+    name: build-assets
+    needs: test
+    runs-on: macos-latest
+    if: github.event_name != 'pull_request'
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      cli_sha256: ${{ steps.sha.outputs.cli_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the .app
+        run: bash scripts/make-app.sh
+
+      - name: Extract version
+        id: ver
+        run: |
+          V="$(sed -n 's/^REPKGER_VERSION="\([^"]*\)"/\1/p' bin/repkger | head -1)"
+          case "$V" in
+            [0-9]*\.[0-9]*\.[0-9]*) ;;
+            *) echo "bad REPKGER_VERSION in bin/repkger: '$V'" >&2; exit 1 ;;
+          esac
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble dist assets
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          mkdir -p dist/repkger-cli
+          cp bin/repkger dist/repkger-cli/repkger
+          cp bin/repkger dist/repkger
+          chmod +x dist/repkger dist/repkger-cli/repkger
+          (cd dist/repkger-cli && zip -r -q "../repkger-$V.zip" repkger)
+          ditto -c -k --keepParent build/Repkger.app "dist/Repkger-$V.app.zip"
+          (cd dist && shasum -a 256 repkger "repkger-$V.zip" "Repkger-$V.app.zip" > SHA256SUMS.txt)
+          echo "--- dist/ ---"
+          ls -la dist
+          echo "--- repkger-$V.zip contents ---"
+          unzip -l "dist/repkger-$V.zip"
+
+      - name: Record CLI zip sha256
+        id: sha
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          echo "cli_sha256=$(shasum -a 256 "dist/repkger-$V.zip" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: publish-release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Create / refresh GitHub release
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          NOTES="$(mktemp)"
+          {
+            echo "Automated build of \`$SHA\`."
+            echo
+            echo "## Assets"
+            echo "- \`repkger\` — the CLI (single bash file; also embedded in the app)"
+            echo "- \`repkger-$VERSION.zip\` — CLI zip (used by the Homebrew tap)"
+            echo "- \`Repkger-$VERSION.app.zip\` — drag to /Applications (ad-hoc signed)"
+            echo "- \`SHA256SUMS.txt\` — checksums"
+            echo
+            echo "## Homebrew"
+            echo '    brew install ksl-testing/tap/repkgr'
+            echo
+            echo "## Commits"
+            git log --oneline -15 | sed 's/^/- /'
+          } > "$NOTES"
+          # Refreshing the same tag keeps one canonical release per version and
+          # stable download URLs (releases/download/vX.Y.Z/...).
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          fi
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "repkger v$VERSION" \
+            --notes-file "$NOTES"
+
+      - name: Update homebrew tap (ksl-testing/homebrew-tap)
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+          CLI_SHA256: ${{ needs.build.outputs.cli_sha256 }}
+        run: bash scripts/update-tap.sh
