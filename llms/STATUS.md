@@ -36,10 +36,10 @@
 ## Outstanding
 - Historical v0.1.0 `~/Applications` damage on this machine not yet reversed
   (tool can no longer cause it). See `llms.md` → "Old v0.1.0 damage reversal".
-- **Release pipeline + brew tap written and locally validated** (see below)
-  but not yet live: everything is uncommitted, so nothing has been pushed and
-  no GitHub release / tap exists yet. First publish steps in
-  `llms/ROADMAP.md` → item 5.
+- **Release pipeline live**: v0.2.0 pushed (`ff70de3`); the workflow
+  publishes release `v0.2.0` + assets (verify run, then add the `TAP_TOKEN`
+  secret so the tap formulae publish too). FamiStudio cask DONE and live at
+  4.5.3. Fresh-agent pickup: `HANDOFF.md` at the repo root.
 - Repkger.app has no custom icon / notarization / progress UI.
 - Tap casks: the `famistudio` cask is DONE and live at **4.5.3** (rootless
   .NET cask with apphost menu-name fix, de-quarantine self-heal,
