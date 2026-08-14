@@ -207,3 +207,22 @@ to `#!/bin/...`.
 GameMaker.app — it is intentionally rewritten). Prefer
 `brew reinstall --cask suspicious-package platypus` (and famistudio from
 ksl-testing/tap) to restore genuine vendor signatures.
+
+## GitHub access & releases (ops)
+
+Verified 2026-08-14 — re-check if push/release actions misbehave (last known
+failure: 2026-08-13).
+
+- Identity: `Kai SL <114260909+ksl-testing@users.noreply.github.com>`; HTTPS
+  remotes; credential helper `gh auth git-credential` (token in macOS keychain).
+- `gh auth status`: **ksl-testing** active; scopes `gist`, `read:org`, `repo`,
+  `workflow` → push/pull to private repos + workflow file updates work.
+- Verified: `git ls-remote` succeeded against every ksl-testing repo (clones in
+  `~/Documents/GitHub` + `~/homebrew/library/taps/ksl-testing`). Push was not
+  exercised end-to-end from the CLI on that date.
+- 2026-08-13 incident: CLI push + `gh release create` failed; pushed manually
+  via GitHub Desktop; no releases could be created. If a release is needed,
+  run `gh auth status` first, then `gh release create`. Release uploads
+  consume free-plan quota — fine for real releases, avoid churn.
+- Housekeeping: READMEs/assets may be stale across projects; verify before
+  trusting them.
