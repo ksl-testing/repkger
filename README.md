@@ -44,13 +44,63 @@ bin/repkger gui                                                 # open the Repkg
 bin/repkger self-install                                        # symlink into ~/bin + brewpkg() in ~/.zshrc
 ```
 
-## Quick start (GUI)
+## Build it yourself
+
+Everything is plain bash + AppleScript + Apple's built-in tools (`pkgutil`,
+`pkgbuild`, `xar`, `lsbom`, `xattr`, `codesign`, `osacompile`, `PlistBuddy`,
+`ditto`) — **no Xcode, no third-party deps, no network**. Any macOS with the
+Command Line Tools installed will do.
+
+### The CLI
+
+There is nothing to compile: `bin/repkger` is the whole CLI in one bash
+script (macOS bash 3.2 compatible). Drop it on your `PATH` (or
+`./bin/repkger self-install`) and it runs.
+
+### The GUI app (`Repkger.app`)
 
 ```bash
-scripts/make-app.sh                       # builds build/Repkger.app
+scripts/make-app.sh                       # -> build/Repkger.app
 open -a build/Repkger.app                 # mode chooser (Inspect / Install / Uninstall)
 open -a build/Repkger.app some.pkg        # or drop .pkg files on the app icon
 ```
+
+The app is self-contained (the CLI lives inside the bundle) and portable —
+drag it anywhere, even off a USB stick. It processes packages **independently**:
+drop several `.pkg` files on the icon, or open the app and pick one or many
+files (Cmd-click to multi-select in the open dialog) — each one is inspected
+or installed on its own, with `(1 of N)` progress notifications, and a failure
+on one doesn't stop the rest.
+
+`make-app.sh` does the whole assembly:
+
+1. `osacompile`s the droplet source `gui/Repkger.applescript` into
+   `build/Repkger.app`;
+2. embeds `bin/repkger` into `Contents/Resources/repkger` so the app works
+   without repkger on PATH;
+3. stamps the bundle id `com.ksl-testing.repkger` + version (read from
+   `bin/repkger`'s `REPKGER_VERSION`) and registers `.pkg`/`.mpkg` as
+   document types via `PlistBuddy`;
+4. ad-hoc signs the bundle (`codesign -s -`).
+
+Drop `gui/Repkger.icns` into the repo to give the app a custom icon (it's
+picked up automatically). The result is a standard macOS bundle — drag it to
+`/Applications`, zip it, or run it straight from `build/`.
+
+### Running the tests
+
+```bash
+test/make-fixture.sh                       # builds a tiny mini.pkg (no downloads)
+bash test/roundtrip.sh                     # 28 checks: install -> uninstall round-trip
+```
+
+### Building the distributable artifacts
+
+The GitHub Actions workflow (`.github/workflows/release.yml`) does exactly
+this on every push to `main` (or `gh workflow run build-release.yml`): run
+`test/roundtrip.sh`, build the app with `make-app.sh`, then zip up
+`Repkger-<v>.app.zip` + `repkger-<v>.zip` + the raw script + `SHA256SUMS.txt`
+and publish them as a GitHub release — same commands you can run by hand.
 
 Dropping a package on the app shows a Suspicious Package-style inspection
 (components, scripts, BOM entries with their home-mapped destinations), then

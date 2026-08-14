@@ -18,22 +18,27 @@ Full procedure in `llms.md` → "Old v0.1.0 damage reversal". Also consider a
 `repkger undo-rewrite <dir>` command that automates the reverse mapping
 (using the same longest-prefix token logic as `rewrite_one`, inverted).
 
-## 3. ~~GUI `Repkger.app`~~ — DONE (v0.2.0, 2026-08-11)
+## 3. ~~GUI `Repkger.app`~~ — DONE (v0.2.0, 2026-08-11; multi-select 2026-08-13)
 - `gui/Repkger.applescript` droplet: `on open droppedItems` → Inspect /
-  Install per drop; `on run` mode chooser (Inspect / Install / Uninstall);
+  Install per drop (multiple drops looped independently); `on run` mode
+  chooser (Inspect / Install / Uninstall) with a **multi-select** open dialog
+  (`choosePkgs`, `multiple selections allowed true`) that processes each
+  chosen .pkg independently with per-file `(i of n)` progress notifications;
   Suspicious-Package-style inspect dialog (components, scripts, `--files 20`
   BOM listing with home-mapped destinations), Full Report → TextEdit,
   Install → `repkger install --home $HOME --yes`; headless
-  `--install <pkg> [--home dir] [--data dir]` + `--inspect <pkg>`.
+  `--install <pkg> [--home dir] [--data dir]` + `--inspect <pkg>` (drive via
+  `osascript`, NOT the raw binary — droplets ignore argv).
 - `scripts/make-app.sh`: osacompile → `build/Repkger.app`, embeds
   `bin/repkger` into `Contents/Resources/`, sets
-  `com.ksl-testing.repkger` + version, registers `.pkg`/`.mpkg` doc types via
-  PlistBuddy, ad-hoc signs. `repkger gui` finds it in build/ / repo root /
+  `com.ksl-testing.repkger` + version (now read from `bin/repkger`'s
+  `REPKGER_VERSION`), registers `.pkg`/`.mpkg` doc types via PlistBuddy,
+  ad-hoc signs. `repkger gui` finds it in build/ / repo root /
   `~/Applications` / `/Applications`.
 - **Remaining polish**: custom icon (`gui/Repkger.iconset` + iconutil +
   `CFBundleIconFile` — make-app.sh already supports `gui/Repkger.icns`);
-  progress UI (install currently beachballs while the CLI runs);
-  notarization (needs a paid dev account).
+  real progress UI (install is notifications-only; the CLI run blocks the
+  droplet); notarization (needs a paid dev account).
 
 ## 4. ~~Brew formula pipeline~~ — DONE (2026-08-11, pre-v0.2.0-publish)
 - `tap/repkgr.rb` + `tap/repkger.rb` templates → `scripts/update-tap.sh`
@@ -60,14 +65,23 @@ Full procedure in `llms.md` → "Old v0.1.0 damage reversal". Also consider a
   livecheck `https://gms.yoyogames.com/update-mac.rss` (sparkle).
 - `repkger brew --cask <name>` wrapper already implemented in the CLI.
 
-## 5. First publish (one-time)
-- Commit everything (all v0.2.0 work is still uncommitted), then
-  `git push -u origin main` — the workflow builds, tests, and publishes
-  `v0.2.0` automatically (the release tag is created by the pipeline).
+## 5. First publish (one-time — IN PROGRESS)
+- ~~Commit everything~~ — DONE (2026-08-13 push; the fixed pipeline
+  auto-runs: test → build → publish `v0.2.0` + assets → tap update attempt).
 - Add a `TAP_TOKEN` PAT secret (repo scope) to ksl-testing/repkger so the
   tap-update step runs; without it the release still publishes.
 - Verify: `gh release view v0.2.0`, `brew install ksl-testing/tap/repkgr`,
   and later `brew install --cask ksl-testing/tap/gamemaker` once the cask lands.
+
+## 6. Unity Editor rootless install test (user-requested verification)
+The user wants to skip Unity Hub and extract the editor .pkg to ~/
+locations. Pkg ready: `~/Downloads/Unity-6000.3.22f1.pkg` (LTS 6000.3.22f1,
+5,133,313,381 bytes) from
+`https://download.unity3d.com/download_unity/1c726e1fb402/MacEditorInstaller/Unity.pkg`.
+Plan: `inspect --files 15` (confirm payload layout), then
+`install --home $HOME --yes`, launch Unity.app once, `list` + `uninstall` to
+verify reversal. See HANDOFF pending 1. On success, add Unity to the README
+"Validated" list.
 
 ## Ideas parked
 - `--run-scripts` hardening: run pre/postinstall with a sandboxed home-rooted

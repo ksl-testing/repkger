@@ -54,7 +54,7 @@ on run argv
                 end if
             end repeat
         end if
-        my doInstall(pkgPath, homeRoot, dataDir)
+        my doInstall(pkgPath, homeRoot, dataDir, "")
         return
     end if
     if a1 is "--inspect" then
@@ -81,7 +81,7 @@ on handleDrops(theItems)
             if c is "Inspect" then
                 my showInspect(p)
             else if c is "Install" then
-                my doInstall(p, "", "")
+                my doInstall(p, "", "", "")
             end if
         end if
     end repeat
@@ -89,25 +89,45 @@ end handleDrops
 
 on modeChooser()
     set c to button returned of (display dialog "Repkger — rootless .pkg installer" & linefeed & "Unpack and install .pkg files into your home directory — no admin, no sudo." & linefeed & "Drop .pkg files onto the app icon anytime." buttons {"Cancel", "Uninstall", "Inspect", "Install"} default button "Install" with title "Repkger")
-    if c is "Inspect" then
-        set p to my choosePkg()
-        if p is not "" then my showInspect(p)
-    else if c is "Install" then
-        set p to my choosePkg()
-        if p is not "" then my doInstall(p, "", "")
-    else if c is "Uninstall" then
+    if c is "Uninstall" then
         my doUninstall()
+        return
+    end if
+    if c is not "Inspect" and c is not "Install" then return
+    set pkgs to my choosePkgs()
+    if pkgs is {} then return
+    set n to (count of pkgs)
+    if c is "Inspect" then
+        repeat with p in pkgs
+            my showInspect(p)
+        end repeat
+    else
+        set i to 0
+        repeat with p in pkgs
+            set i to i + 1
+            if n > 1 then
+                set label to ("(" & (i as text) & " of " & (n as text) & ") " & (do shell script "basename " & quoted form of p))
+                my doInstall(p, "", "", label)
+            else
+                my doInstall(p, "", "", "")
+            end if
+        end repeat
     end if
 end modeChooser
 
-on choosePkg()
+-- multi-select open dialog; returns a list of POSIX paths ({} if cancelled)
+on choosePkgs()
     try
-        set f to choose file with prompt "Choose an installer package (.pkg / .mpkg)" default location (path to downloads folder)
-        return POSIX path of f
+        set f to choose file with prompt "Choose one or more installer packages (.pkg / .mpkg)" default location (path to downloads folder) multiple selections allowed true
+        set out to {}
+        repeat with itemRef in f
+            set end of out to POSIX path of itemRef
+        end repeat
+        return out
     on error
-        return ""
+        return {}
     end try
-end choosePkg
+end choosePkgs
 
 -- Suspicious Package-style inspection: components, scripts, and the first N
 -- BOM entries with their home-mapped destinations
@@ -129,26 +149,33 @@ on showInspect(p)
             do shell script "cat > " & quoted form of tmp & " <<'REPKGER_EOF'" & linefeed & out & linefeed & "REPKGER_EOF"
             do shell script "open " & quoted form of tmp
             set again to button returned of (display dialog "Full report opened in TextEdit." & linefeed & "Install " & titleTxt & " into your home directory?" buttons {"No", "Yes"} default button "Yes" with title "Repkger")
-            if again is "Yes" then my doInstall(p, "", "")
+            if again is "Yes" then my doInstall(p, "", "", "")
         on error
             display dialog "Could not open the report." buttons {"OK"} default button "OK" with title "Repkger"
         end try
     else if c is "Install" then
-        my doInstall(p, "", "")
+        my doInstall(p, "", "", "")
     end if
 end showInspect
 
-on doInstall(p, homeRoot, dataDir)
+on doInstall(p, homeRoot, dataDir, progressLabel)
     set cli to my cliPath()
     if homeRoot is "" then set homeRoot to (do shell script "echo $HOME")
     set envPrefix to ""
     if dataDir is not "" then set envPrefix to "REPKGER_DATA=" & quoted form of dataDir & " "
     set cmd to envPrefix & quoted form of cli & " install " & quoted form of p & " --home " & quoted form of homeRoot & " --yes"
+    if progressLabel is not "" then
+        display notification "Installing " & progressLabel & "…" with title "Repkger"
+    end if
     try
         with timeout of 3600 seconds
             do shell script cmd
         end timeout
-        display notification "Installed into your home directory (no admin needed)" with title "Repkger" subtitle (do shell script "basename " & quoted form of p)
+        if progressLabel is not "" then
+            display notification "Installed " & progressLabel with title "Repkger"
+        else
+            display notification "Installed into your home directory (no admin needed)" with title "Repkger" subtitle (do shell script "basename " & quoted form of p)
+        end if
     on error errMsg
         display dialog "Install failed:" & linefeed & p & linefeed & linefeed & errMsg buttons {"OK"} default button "OK" with title "Repkger" with icon stop
     end try

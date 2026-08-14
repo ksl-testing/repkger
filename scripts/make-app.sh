@@ -16,7 +16,12 @@ src_applescript="$root/gui/Repkger.applescript"
 cli="$root/bin/repkger"
 out="$root/build/Repkger.app"
 bundle_id="com.ksl-testing.repkger"
-version="0.2.0"
+# single source of truth for the version is bin/repkger
+version="$(sed -n 's/^REPKGER_VERSION="\([^"]*\)"/\1/p' "$cli" | head -1)"
+case "$version" in
+    [0-9]*\.[0-9]*\.[0-9]*) ;;
+    *) echo "bad REPKGER_VERSION in bin/repkger: '$version'" >&2; exit 1 ;;
+esac
 
 command -v osacompile >/dev/null 2>&1 || { echo "osacompile not found (macOS required)" >&2; exit 1; }
 [ -f "$src_applescript" ] || { echo "missing $src_applescript" >&2; exit 1; }

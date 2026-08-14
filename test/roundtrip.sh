@@ -55,7 +55,17 @@ echo "decoy payload" > "$H/Applications/Decoy.app/Contents/decoy.txt"
 xattr -w com.apple.quarantine "0083;5f2e2a2e;MiniApp;1;test" "$H"
 xattr -w com.apple.quarantine "0083;5f2e2a2e;MiniApp;1;test" "$H/Applications"
 
-REPKGER_DATA="$D1" "$R" install "$PKG" --home "$H" --yes >/dev/null
+# Pin the fixture's system dirs to the scratch home. Default mapping keeps a
+# location in place when the top-level dir is writable, so on admin machines
+# (CI runners, admin dev accounts) /Applications and /Library are kept and the
+# app would land in the REAL system dirs. Pinning makes phase 1 deterministic
+# on every machine while still exercising default mapping for /Users and the
+# always-keep dirs (/Users/Shared, /tmp) below.
+REPKGER_DATA="$D1" "$R" install "$PKG" --home "$H" \
+    --map "/Applications=$H/Applications" \
+    --map "/Library=$H/Library" \
+    --map "/usr/local=$H/.local" \
+    --yes >/dev/null
 
 check "decoy untouched"            grep -q "decoy payload" "$H/Applications/Decoy.app/Contents/decoy.txt"
 check "quarantine stripped from parent dir (\$H)" \

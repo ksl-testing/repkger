@@ -63,6 +63,12 @@ NOTES.md                # dev notes: architecture, validated behavior, gotchas
   bundle id `com.ksl-testing.repkger`, `.pkg`/`.mpkg` doc types, ad-hoc
   signed. `repkger gui` finds it in `build/`, repo root, `~/Applications`,
   or `/Applications`.
+- **GUI multi-select (2026-08-13)**: open dialog accepts multiple .pkg files
+  (`choosePkgs`, `multiple selections allowed true`); mode chooser and
+  drag-drop process each file independently in a loop with per-file
+  `(i of n)` progress notifications; failures don't stop the batch.
+  `make-app.sh` derives the version from `bin/repkger`'s `REPKGER_VERSION`
+  instead of hardcoding.
 - Fixed pre-existing bugs found along the way: single-component packages that
   expand with `PackageInfo` at the root (component_dirs now checks the root),
   `//` double-slash paths when install-location is `/` (which also broke
@@ -95,9 +101,13 @@ REPKGER_DATA=/tmp/rk-data $R list
 REPKGER_DATA=/tmp/rk-data $R uninstall com.test.miniapp --yes
 find /tmp/rk-home | wc -l                  # expect 1 (only the root)
 
-# GUI headless flow (no dialogs):
+# GUI headless flow (no dialogs) — osascript ONLY:
 PATH="$PWD/bin:$PATH" osascript gui/Repkger.applescript --install /tmp/repkger-fixture/mini.pkg --home /tmp/rk-home --data /tmp/rk-data
+osascript build/Repkger.app --install /tmp/repkger-fixture/mini.pkg --home /tmp/rk-home --data /tmp/rk-data   # uses embedded CLI
 scripts/make-app.sh                        # rebuild build/Repkger.app
+# NOTE: droplets ignore argv when run directly (MacOS/droplet --install …) or
+# via `open --args` — always drive headless tests through `osascript`, and
+# pkill -f MacOS/droplet first (a stale instance swallows Apple events).
 ```
 
 ## Key implementation facts (gotchas learned)
@@ -134,26 +144,37 @@ scripts/make-app.sh                        # rebuild build/Repkger.app
   refuses to run when renamed — the reliable fix for a .NET app's menu name is
   a real apphost (generate via `dotnet publish` of a minimal project named
   after the app, then `exec` it next to the app's dll + runtimeconfig).
+- **osacompile droplets ignore argv** when launched directly
+  (`Contents/MacOS/droplet --install …` receives `{"current application"}` or
+  nothing → falls into the mode-chooser dialog and hangs) and via
+  `open --args`; headless automation must use `osascript <app-or-source>`.
+  A stale running droplet intercepts Apple events and hangs new osascript
+  calls — `pkill -f MacOS/droplet` first.
+- **AppleScript handlers have NO optional parameters** — adding a param to
+  `doInstall` broke every 3-arg call site with `-1721`; grep for all callers
+  after changing arity.
+- **CI round-trip (2026-08-13)**: `test/roundtrip.sh` phase 1 pins `--map`
+  `/Applications`, `/Library`, `/usr/local` to the scratch home because the
+  default keep-if-writable mapping keeps fixture files in the REAL system
+  dirs on admin machines (GitHub runners) — the original test only passed on
+  standard-user machines. 28/28 everywhere now.
 
 ## Next milestones (details in llms/ROADMAP.md)
 
-1. Reverse the historical ~/Applications damage (procedure below).
-2. ~~Brew formula pipeline~~ — DONE: `.github/workflows/release.yml` runs
-   tests, builds `Repkger.app` + CLI assets, publishes a GitHub release on
-   every `main` push (and via `gh workflow run build-release.yml`), then calls
-   `scripts/update-tap.sh` which creates/refreshes `Formula/repkgr.rb` +
-   `Formula/repkger.rb` (alias) in `ksl-testing/homebrew-tap` from the
-   `tap/*.rb` templates. Locally validated end-to-end: `brew style` clean,
-   `brew install` + `brew test` of the generated formula both pass.
-   Remaining: add the `TAP_TOKEN` PAT secret to the repo and push. The
-   `famistudio` cask is DONE (rootless .NET cask — apphost menu-name fix,
-   de-quarantine self-heal, settings/autosave symlinks, daily livecheck,
-   live at 4.5.3). Still open: `Casks/repkger.rb` (GUI) + rootless
-   `Casks/gamemaker.rb`.
-3. First publish: commit, `git push -u origin main` (workflow auto-runs),
-   add `TAP_TOKEN` (PAT, repo scope) as a repo secret so the tap update step
-   runs, then verify `brew install ksl-testing/tap/repkgr` and
-   `gh release view v0.2.0`.
+1. **Unity Editor rootless install test** (user request; pkg downloaded at
+   `~/Downloads/Unity-6000.3.22f1.pkg`, 5,133,313,381 bytes — sha256
+   verify before use). Source URL:
+   `https://download.unity3d.com/download_unity/1c726e1fb402/MacEditorInstaller/Unity.pkg`
+   (6000.3.22f1 LTS; hash via
+   `services.api.unity.com/unity/editor/release/v1/releases`). Plan:
+   inspect → `install --home $HOME --yes` → launch Unity.app once →
+   `uninstall` to verify reversal. See HANDOFF pending step 1.
+2. **Release re-run**: this session's push auto-triggers the fixed pipeline
+   (test fix in `test/roundtrip.sh`); verify `gh release view v0.2.0` and add
+   the `TAP_TOKEN` secret.
+3. Reverse the historical ~/Applications damage (procedure below).
+4. ~~Brew formula pipeline~~ — DONE (see below; TAP_TOKEN still needed).
+5. First publish — in progress via the pipeline (see item 2).
 
 ## Old v0.1.0 damage reversal (still pending)
 

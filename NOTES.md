@@ -47,9 +47,15 @@
     osacompile droplet; embedded CLI in `Contents/Resources/repkger`
     (`cliPath()` finds it via `path to me`); `on open` drop handler →
     Inspect dialog (`inspect --files 20` + Full Report via TextEdit) or
-    Install (`install --home $HOME --yes`); `on run` mode chooser; headless
-    `--install <pkg> [--home dir] [--data dir]` and `--inspect <pkg>`;
-    `com.ksl-testing.repkger`, `.pkg`/`.mpkg` doc types, ad-hoc signed.
+    Install (`install --home $HOME --yes`); `on run` mode chooser with a
+    **multi-select** open dialog (`choosePkgs`) — each chosen/dropped .pkg is
+    processed independently in a loop with per-file `(i of n)` progress
+    notifications (AppleScript has no optional params — `doInstall` takes
+    `(p, homeRoot, dataDir, progressLabel)`; every call site passes all 4);
+    headless `--install <pkg> [--home dir] [--data dir]` and
+    `--inspect <pkg>` — drive via `osascript`, the droplet binary ignores
+    argv; `com.ksl-testing.repkger`, `.pkg`/`.mpkg` doc types, ad-hoc signed;
+    version stamped from `bin/repkger`'s `REPKGER_VERSION` by make-app.sh.
 11. **Release pipeline + brew tap** (`.github/workflows/release.yml`,
     `scripts/update-tap.sh`, `tap/*.rb` templates): push to `main` (source
     paths) or `workflow_dispatch` → test (fixture round-trip + GUI smoke) →
@@ -98,6 +104,19 @@
   script:` executes as current user (`reset_uid`); `depends_on formula:` valid.
 - AppleScript: `it` is a reserved word — use other loop var names; `open -a
   App file.pkg` hits `on open`, `--args` hits `on run argv`.
+- **osacompile droplets ignore argv** when launched directly
+  (`Contents/MacOS/droplet --install …` gets `{"current application"}` or
+  nothing → falls into the mode-chooser dialog and hangs) and via
+  `open --args`; the reliable headless path is
+  `osascript <app-or-source> --install …`. A stale running droplet swallows
+  Apple events and hangs new osascript calls — `pkill -f MacOS/droplet` first.
+- **AppleScript handlers have NO optional/default params** — changing a
+  handler's arity breaks every call site (`-1721`); grep all `my doInstall(`
+  callers after editing.
+- **CI round-trip determinism**: default keep-if-writable keeps `/Applications`
+  in place on admin machines (GitHub runners), so `test/roundtrip.sh` phase 1
+  pins `--map` for `/Applications`, `/Library`, `/usr/local` to the scratch
+  home — 28/28 on both standard and admin users.
 
 ## Test fixtures
 

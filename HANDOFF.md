@@ -4,6 +4,51 @@ A cacheless agent can pick up from this file. Read `README.md`, `llms.md`,
 `llms/STATUS.md`, `llms/ROADMAP.md`, and `NOTES.md` for depth; this is the
 state + next steps.
 
+## Session update (2026-08-13) — committed + pushed
+
+- **GUI upgraded for multi-file use**: `gui/Repkger.applescript` open dialog
+  now supports multi-select (`choosePkgs`, `multiple selections allowed`);
+  the mode chooser processes **each chosen/dropped .pkg independently**
+  (Inspect or Install loop), with per-file `(i of n)` progress notifications;
+  drag-drop of several .pkg files was already supported and still works.
+  `doInstall` gained a `progressLabel` param (AppleScript has NO optional
+  params — every call site must pass 4 args, or you get `-1721`).
+- **`scripts/make-app.sh` now derives the version from `bin/repkger`'s
+  `REPKGER_VERSION`** (was hardcoded 0.2.0). `build/Repkger.app` rebuilt +
+  verified (bundle id, version, ad-hoc signed, embedded CLI).
+- **CI round-trip fix**: `test/roundtrip.sh` phase 1 pins `--map` for
+  `/Applications`, `/Library`, `/usr/local` to the scratch home — the old
+  assertions assumed `/Applications` isn't writable, which is false on admin
+  machines (GitHub `macos-26` runners), so the fixture landed in the REAL
+  `/Applications` and 4 checks failed (run `31548908050`). Verified 28/28
+  locally. **Pushing to `main` now auto-triggers the fixed release pipeline**
+  (paths: bin/gui/scripts/tap/test/workflow all matched).
+- **Unity Editor test material ready** (user requested a Unity Editor.app
+  test): Unity **6000.3.22f1** (latest LTS) pkg fully downloaded at
+  `~/Downloads/Unity-6000.3.22f1.pkg` (5,133,313,381 bytes). Source:
+  `https://download.unity3d.com/download_unity/1c726e1fb402/MacEditorInstaller/Unity.pkg`
+  (hash from `services.api.unity.com/unity/editor/release/v1/releases`).
+  The install test itself was NOT run yet — see Pending step 1.
+- **Gotcha learned**: osacompile droplets do NOT receive argv when run
+  directly (`build/Repkger.app/Contents/MacOS/droplet --install …`) or via
+  `open --args` — `on run argv` gets `{"current application"}` / nothing, so
+  the app falls into the mode chooser dialog and hangs. The working headless
+  path is `osascript build/Repkger.app --install …`. Also: a stale running
+  droplet instance intercepts Apple events — `pkill -f MacOS/droplet` before
+  re-testing or osascript hangs.
+
+## Auth note (2026-08-13) — push is BLOCKED, commit is ready
+
+`git push` to `github.com/ksl-testing/repkger` returns **403 "Write access
+not granted"** with every credential on this machine: the keychain entry and
+the `gh` token are the same fine-grained PAT (`github_pat_…`, account
+`ksl-testing`) which has no write scope on this repo. No SSH keys exist
+(`~/.ssh` absent). The 2026-08-13 commit (`2d8c735` + the amend) is local
+only. To unblock: `gh auth login` (or `gh auth refresh -s repo`) with a
+classic PAT that has `repo` scope and is authorized for `ksl-testing/repkger`,
+then `git push origin main`. Until pushed, the release pipeline will NOT run.
+Also note the same PAT is what's needed for `TAP_TOKEN`-style pushes.
+
 ## Repos & remotes
 
 - **repkger** (this repo): `github.com/ksl-testing/repkger`, branch `main`.
@@ -25,9 +70,15 @@ tap/test/workflow) or manual `gh workflow run build-release.yml`:
 → **release** (publish/refresh `v0.2.0` + assets) → **tap update**
 (`scripts/update-tap.sh`).
 
-- The push of `ff70de3` started run **31548908050** (~00:04 UTC); it was
-  still in progress at handoff. Check:
-  `gh run watch 31548908050 --repo ksl-testing/repkger` then
+- The push of `ff70de3` started run **31548908050** (~00:04 UTC) which
+  **FAILED** in the test job: 4 phase-1 round-trip checks, because the
+  `macos-26` runner user is an admin and `/Applications` is writable, so the
+  default keep-if-writable mapping kept the fixture in the real `/Applications`
+  (and dequarantine then walked it — 9.5 min job). **Fixed**:
+  `test/roundtrip.sh` phase 1 now pins `--map` for `/Applications`,
+  `/Library`, `/usr/local` to the scratch home (deterministic on every
+  machine; verified 28/28 locally). Re-trigger with
+  `gh workflow run build-release.yml --repo ksl-testing/repkger`, then
   `gh release view v0.2.0 --repo ksl-testing/repkger`.
 - **Needs one secret to go live end-to-end**: add a PAT (repo scope) as the
   `TAP_TOKEN` secret on `ksl-testing/repkger`. Without it the release still
@@ -75,20 +126,41 @@ commits, pushes).
 
 ## Pending / next steps
 
-1. Confirm release run `31548908050` → `gh release view v0.2.0`; add the
-   `TAP_TOKEN` secret; then `brew install ksl-testing/tap/repkgr` on a clean
-   machine.
-2. Optional tap work: `Casks/repkger.rb` (GUI app cask, depends_on formula
+1. **Unity Editor rootless install test** (user request; pkg is ready at
+   `~/Downloads/Unity-6000.3.22f1.pkg`). Verify sha256 first, then:
+   `bin/repkger inspect <pkg> --files 15`, then
+   `bin/repkger install <pkg> --home $HOME --yes` (this lands
+   `~/Applications/Unity/Hub/Editor/6000.3.22f1/Unity.app` or similar —
+   confirm the actual payload layout with `inspect --files` first), launch
+   the editor once (`open ~/Applications/…/Unity.app`), then `repkger list` +
+   `repkger uninstall` to verify reversal. The pkg is ~5 GB so give the
+   CLI 10+ min; the GUI's `doInstall` timeout is 3600 s.
+2. **Release**: this session's push auto-triggers the fixed pipeline. Verify
+   `gh run list`, then `gh release view v0.2.0 --repo ksl-testing/repkger`
+   (assets: `Repkger-0.2.0.app.zip`, `repkger-0.2.0.zip`, raw script,
+   `SHA256SUMS.txt`). Add the `TAP_TOKEN` PAT (repo scope) secret so
+   `scripts/update-tap.sh` can push the formula, then
+   `brew install ksl-testing/tap/repkgr` on a clean machine.
+3. Optional tap work: `Casks/repkger.rb` (GUI app cask, depends_on formula
    "repkger") and rootless `Casks/gamemaker.rb` (pkg sha
    `8cbd33a9…cc7f`, livecheck gms.yoyogames.com RSS) — ROADMAP item 4.
-3. Reverse the historical v0.1.0 `~/Applications` damage — procedure in
+   Note: the tap repo currently has an untracked `Casks/gamehub.rb` that was
+   NOT created in the 2026-08-13 session — do not commit it without asking.
+4. Reverse the historical v0.1.0 `~/Applications` damage — procedure in
    `llms.md` → "Old v0.1.0 damage reversal"; `repkger undo-rewrite` idea in
    ROADMAP.
-4. FamiStudio user confirmation: relaunch and check the menu says
+5. FamiStudio user confirmation: relaunch and check the menu says
    "About/Hide/Quit FamiStudio".
 
 ## Gotchas (recurring)
 
+- **osacompile droplets ignore argv** when launched directly or via
+  `open --args`; headless automation must use `osascript <app-or-src>`.
+  Kill stale droplet instances (`pkill -f MacOS/droplet`) before testing or
+  Apple events route to a hung instance.
+- **AppleScript handlers have no optional params** — changing a handler's
+  arity breaks every call site with `-1721`; grep for all `my doInstall(`
+  calls after editing.
 - **AppKit menu items** follow the executable file name (not argv[0]);
   `exec -a` fixes only the menu-bar title; the dotnet muxer refuses to run
   renamed → use a real apphost.
