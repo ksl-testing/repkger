@@ -59,8 +59,8 @@
   notifications-only (no progress bar yet).
 - Tap casks: the `famistudio` cask is DONE and live at **4.5.3** (rootless
   .NET cask with apphost menu-name fix, de-quarantine self-heal,
-  settings/autosave symlinks, daily livecheck — upgrade verified: settings
-  ini byte-identical after `brew upgrade --cask famistudio`). Still open:
+  settings/autosave symlinks, weekly Monday livecheck — upgrade verified:
+  settings ini byte-identical after `brew upgrade --cask famistudio`). Still open:
   `Casks/repkger.rb` (GUI) + rootless `Casks/gamemaker.rb`.
 
 ## Release pipeline (new in this session, validated locally)

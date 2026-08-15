@@ -187,10 +187,12 @@ launcher it injects:
   upgrades never touch it); the cask postflight symlinks `FamiStudio.ini` +
   `AutoSaves/` into `~/Documents/FamiStudio/` next to the demo files it
   extracts, re-linking after every update.
-- **Daily livecheck**: `.github/workflows/update-famistudio.yml` bumps the
-  cask's `version`/`sha256` once a day (and on demand via
-  `gh workflow run update-famistudio.yml`), verifying the downloaded asset
-  against GitHub's published digest.
+- **Scheduled livecheck**: the associated tap's
+  `.github/workflows/update-famistudio.yml` checks FamiStudio weekly on Monday
+  (and remains available on demand via `gh workflow run update-famistudio.yml`),
+  verifying the downloaded asset against GitHub's published digest. The tap's
+  other trackers are weekly or monthly according to their source activity;
+  these workflows update cask metadata only and do not publish releases.
 
 ## Roadmap / status
 

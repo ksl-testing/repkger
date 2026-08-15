@@ -37,17 +37,14 @@ state + next steps.
   droplet instance intercepts Apple events — `pkill -f MacOS/droplet` before
   re-testing or osascript hangs.
 
-## Auth note (2026-08-13) — push is BLOCKED, commit is ready
+## Auth note (2026-08-13 incident — resolved in the 2026-08-14 sync)
 
-`git push` to `github.com/ksl-testing/repkger` returns **403 "Write access
-not granted"** with every credential on this machine: the keychain entry and
-the `gh` token are the same fine-grained PAT (`github_pat_…`, account
-`ksl-testing`) which has no write scope on this repo. No SSH keys exist
-(`~/.ssh` absent). The 2026-08-13 commit (`2d8c735` + the amend) is local
-only. To unblock: `gh auth login` (or `gh auth refresh -s repo`) with a
-classic PAT that has `repo` scope and is authorized for `ksl-testing/repkger`,
-then `git push origin main`. Until pushed, the release pipeline will NOT run.
-Also note the same PAT is what's needed for `TAP_TOKEN`-style pushes.
+The 2026-08-13 CLI push failure returned **403 "Write access not granted"**;
+the user had to push manually through GitHub Desktop. The HTTPS +
+`gh auth git-credential` path is now working again for this repo, and the
+pending documentation/project commits are being pushed through the CLI. No
+release is created by this documentation sync; release creation remains a
+separate deliberate action. No SSH keys are required on this machine.
 
 ## Repos & remotes
 
@@ -115,14 +112,23 @@ injects a self-healing launcher (`Contents/MacOS/main.command`):
 - Also patched for the same menu-name issue: `Casks/famistudio-portable.rb`,
   `patch-famistudio.sh`.
 
-## Livecheck/update workflows — now daily
+## Livecheck/update workflows — activity-matched cadence
 
-All tap updaters run once daily UTC (down from 2x/week / 2x/day):
-famistudio `17 3 * * *`, tpl-bootkit `17 3 * * *`, kirastudio `23 3 * * *`,
-reaper `23 3 * * *`, freebuff-beta `29 3 * * *`. Manual run:
-`gh workflow run update-famistudio.yml --repo ksl-testing/homebrew-tap`
-(updater verifies sha256 against GitHub's asset digest, bumps the cask,
-commits, pushes).
+The tap workflows no longer run daily. Current schedules are:
+
+| Tracker | Schedule |
+|---|---|
+| famistudio | weekly Monday, `17 3 * * 1` |
+| freebuff-beta | weekly Tuesday, `29 3 * * 2` |
+| reaper | weekly Wednesday, `23 3 * * 3` |
+| kirastudio | monthly 2nd, `23 3 2 * *` (currently inert without private-repo auth) |
+| tpl-bootkit | monthly 3rd, `17 3 3 * *` (currently inert without private-repo auth) |
+| csp | monthly 1st, `17 3 1 * *` in `homebrew-csp` |
+
+Every workflow retains `workflow_dispatch` for an urgent update. These Actions
+only update tap metadata; they do not create or upload source-project releases.
+Manual run example:
+`gh workflow run update-famistudio.yml --repo ksl-testing/homebrew-tap`.
 
 ## Pending / next steps
 

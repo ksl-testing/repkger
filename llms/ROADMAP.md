@@ -55,7 +55,8 @@ Full procedure in `llms.md` → "Old v0.1.0 damage reversal". Also consider a
   self-healing launcher (dotnet discovery + repair prompt), de-quarantine
   self-heal (bundle + parent on every launch), a bundled .NET apphost so the
   macOS menu says "FamiStudio" not "dotnet", settings/autosave symlinks into
-  ~/Documents/FamiStudio, and a daily livecheck updater — live at 4.5.3.
+  ~/Documents/FamiStudio, and a weekly Monday livecheck updater — live at
+  4.5.3.
 - Still open: `Casks/repkger.rb` (GUI app to /Applications, depends_on
   formula: "repkger") and the rootless `Casks/gamemaker.rb` example:
   `preflight do` writes `repkger-install.sh` into `staged_path`, then
