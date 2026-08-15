@@ -4,10 +4,10 @@ A cacheless agent can pick up from this file. Read `README.md`, `llms.md`,
 `llms/STATUS.md`, `llms/ROADMAP.md`, and `NOTES.md` for depth; this is the
 state + next steps.
 
-## Session update (2026-08-15) — CI runs BLOCKED by GitHub billing; no release yet
+## Session update (2026-08-15) — CI BLOCKED by billing; v0.2.0 published manually via gh
 
-Checked live 2026-08-15 (`gh run list` / `gh run view`): the fixed pipeline
-has NOT produced a release. Two runs exist on `main`:
+Checked live 2026-08-15 (`gh run list` / `gh run view`): GitHub Actions runs
+never start for this account. Two runs exist on `main`:
 
 - Run **31548908050** (push of `ff70de3`) — FAILED in `test`: the real
   admin-runner `/Applications` issue (fixed below).
@@ -16,22 +16,19 @@ has NOT produced a release. Two runs exist on `main`:
   payments have failed or your spending limit needs to be increased"* — the
   Actions jobs never ran. This is an ACCOUNT/BILLING block, not a code or
   workflow issue.
-- `gh release view v0.2.0` → **release not found**. `TAP_TOKEN` still not set.
 
-So the pipeline is code-ready (28/28 locally) but GitHub Actions is currently
-unusable for this account. Until billing is resolved, publish manually from
-this Mac (no Actions minutes):
+So the pipeline is code-ready (28/28 locally) but Actions is unusable until
+billing is fixed. **v0.2.0 was published manually through the gh CLI on
+2026-08-15** (zero Actions quota): `test/roundtrip.sh` 28/28 →
+`scripts/make-app.sh` → assemble `dist/` → `gh release create v0.2.0`.
+Release live at `github.com/ksl-testing/repkger/releases/tag/v0.2.0` with
+assets `repkger`, `repkger-0.2.0.zip`, `Repkger-0.2.0.app.zip`,
+`SHA256SUMS.txt`. `TAP_TOKEN` still not set (tap formula not yet pushed).
 
-```bash
-# build assets the way the workflow would (make-app.sh + CLI zip + SHA256SUMS)
-# then, from inside the repo:
-gh release create v0.2.0 <Repkger-0.2.0.app.zip> <repkger-0.2.0.zip> <repkger> <SHA256SUMS.txt>
-# or refresh an existing release with gh release upload
-# then push the formula:
-#   add a PAT as the TAP_TOKEN secret on ksl-testing/repkger, then
-scripts/update-tap.sh   # renders tap/repkgr.rb + repkger.rb alias → ksl-testing/homebrew-tap
-```
-
+The automation is **prepped but deferred**: `.github/workflows/release.yml`
+is committed with a "WHEN THIS RUNS" header comment, and
+`scripts/release-gh.sh` is a **non-working PLACEHOLDER** documenting the
+manual gh-CLI steps for the future (fill it in when billing is fixed).
 Re-check `gh run list --repo ksl-testing/repkger` after billing is fixed.
 
 ## Session update (2026-08-13) — committed + pushed
@@ -108,9 +105,11 @@ tap/test/workflow) or manual `gh workflow run build-release.yml`:
 - **Since 2026-08-15 the pipeline cannot run at all**: the re-trigger run
   (31757347428, push of `20ca6d7`) was **blocked by GitHub account
   billing** ("recent account payments have failed or your spending limit
-  needs to be increased") — jobs never started. `v0.2.0` does NOT exist yet.
-  See the 2026-08-15 section at the top of this file for the manual
-  publish path and the billing re-check.
+  needs to be increased") — jobs never started. **v0.2.0 was published
+  manually via the gh CLI instead** (no Actions quota) — see the 2026-08-15
+  section at the top of this file; the workflow stays committed (with a
+  WHEN-THIS-RUNS comment) and `scripts/release-gh.sh` is a non-working
+  placeholder for the future automation.
 - **Needs one secret to go live end-to-end**: add a PAT (repo scope) as the
   `TAP_TOKEN` secret on `ksl-testing/repkger`. Without it the release still
   publishes; the tap step prints a skip notice. With it,
@@ -175,12 +174,14 @@ Manual run example:
    the editor once (`open ~/Applications/…/Unity.app`), then `repkger list` +
    `repkger uninstall` to verify reversal. The pkg is ~5 GB so give the
    CLI 10+ min; the GUI's `doInstall` timeout is 3600 s.
-2. **Release**: this session's push auto-triggers the fixed pipeline. Verify
-   `gh run list`, then `gh release view v0.2.0 --repo ksl-testing/repkger`
+2. **Release** — ~~publish v0.2.0~~ ✅ DONE manually via gh CLI (2026-08-15;
+   no Actions quota): `gh release view v0.2.0 --repo ksl-testing/repkger`
    (assets: `Repkger-0.2.0.app.zip`, `repkger-0.2.0.zip`, raw script,
-   `SHA256SUMS.txt`). Add the `TAP_TOKEN` PAT (repo scope) secret so
-   `scripts/update-tap.sh` can push the formula, then
-   `brew install ksl-testing/tap/repkgr` on a clean machine.
+   `SHA256SUMS.txt`). STILL OPEN: add the `TAP_TOKEN` PAT (repo scope) secret
+   so `scripts/update-tap.sh` can push the formula, then
+   `brew install ksl-testing/tap/repkgr` on a clean machine. When billing is
+   fixed, either re-enable the workflow or finish `scripts/release-gh.sh`
+   (placeholder).
 3. Optional tap work: `Casks/repkger.rb` (GUI app cask, depends_on formula
    "repkger") and rootless `Casks/gamemaker.rb` (pkg sha
    `8cbd33a9…cc7f`, livecheck gms.yoyogames.com RSS) — ROADMAP item 4.

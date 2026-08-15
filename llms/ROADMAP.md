@@ -66,13 +66,19 @@ Full procedure in `llms.md` → "Old v0.1.0 damage reversal". Also consider a
   livecheck `https://gms.yoyogames.com/update-mac.rss` (sparkle).
 - `repkger brew --cask <name>` wrapper already implemented in the CLI.
 
-## 5. First publish (one-time — IN PROGRESS)
-- ~~Commit everything~~ — DONE (2026-08-13 push; the fixed pipeline
-  auto-runs: test → build → publish `v0.2.0` + assets → tap update attempt).
-- Add a `TAP_TOKEN` PAT secret (repo scope) to ksl-testing/repkger so the
-  tap-update step runs; without it the release still publishes.
-- Verify: `gh release view v0.2.0`, `brew install ksl-testing/tap/repkgr`,
-  and later `brew install --cask ksl-testing/tap/gamemaker` once the cask lands.
+## 5. First publish — ✅ DONE manually via gh CLI (2026-08-15)
+- ~~Commit everything~~ — DONE. The CI pipeline is **blocked by GitHub account
+  billing** (runs never start), so v0.2.0 was published manually with the gh
+  CLI (zero Actions quota): 28/28 roundtrip → `make-app.sh` → dist assets →
+  `gh release create v0.2.0` (assets `repkger`, `repkger-0.2.0.zip`,
+  `Repkger-0.2.0.app.zip`, `SHA256SUMS.txt`).
+- ~~Automation~~ DEFERRED, prepped: `.github/workflows/release.yml` carries a
+  WHEN-THIS-RUNS comment; `scripts/release-gh.sh` is a **non-working
+  placeholder** documenting the manual gh steps to convert into a script
+  later (or re-enable the workflow once billing is fixed).
+- STILL OPEN: add a `TAP_TOKEN` PAT secret (repo scope) to ksl-testing/repkger
+  so `scripts/update-tap.sh` pushes the formula; then
+  `brew install ksl-testing/tap/repkgr` on a clean machine.
 
 ## 6. Unity Editor rootless install test (user-requested verification)
 The user wants to skip Unity Hub and extract the editor .pkg to ~/

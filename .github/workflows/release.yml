@@ -1,13 +1,29 @@
 name: build-release
 
-# Every push to main that touches repkger sources triggers: tests -> build ->
-# publish a GitHub release with downloadable assets (.app zip, CLI zip, raw
-# script, checksums) -> refresh the ksl-testing/homebrew-tap formula so
-# `brew install ksl-testing/tap/repkgr` gets the new build.
+# ─────────────────────────────────────────────────────────────────────────────
+# WHEN THIS RUNS
+# ─────────────────────────────────────────────────────────────────────────────
+#   1. push to `main`       — only when the commit touches a SOURCE path
+#                             (bin/ gui/ scripts/ tap/ test/ or this file).
+#                             Docs-only commits (README/llms/HANDOFF/NOTES)
+#                             do NOT trigger it.
+#   2. pull_request -> main — runs the TEST job only; build/release jobs are
+#                             skipped on PRs (if: != pull_request).
+#   3. workflow_dispatch     — manual: Actions UI "Run workflow", the mobile
+#                             app, or the gh CLI. The workflow NAME is
+#                             `build-release` (the FILE is release.yml), so:
+#                               gh workflow run build-release
 #
-# Manual re-trigger (works from gh CLI, the GitHub web UI, or the mobile app):
-#   gh workflow run build-release.yml
-# or: repo -> Actions -> "build-release" -> Run workflow.
+# What it does: test (fixture round-trip 28 checks + GUI smoke) -> build assets
+# (Repkger-<v>.app.zip, repkger-<v>.zip, raw repkger, SHA256SUMS.txt) ->
+# publish/refresh the v<VERSION> GitHub release -> update the
+# ksl-testing/homebrew-tap formula via scripts/update-tap.sh.
+#
+# STATUS (2026-08-15): automation is DEFERRED — GitHub Actions is blocked by
+# account billing, so pushes trigger a run whose jobs never start. The release
+# is currently published MANUALLY through the gh CLI (no Actions quota):
+# see scripts/release-gh.sh (PLACEHOLDER — not wired yet) and HANDOFF.md.
+# This file stays committed so it can be re-enabled when billing is fixed.
 
 on:
   push:
