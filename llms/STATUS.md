@@ -45,12 +45,16 @@
 ## Outstanding
 - Historical v0.1.0 `~/Applications` damage on this machine not yet reversed
   (tool can no longer cause it). See `llms.md` → "Old v0.1.0 damage reversal".
-- **Release pipeline**: first run (`31548908050`) failed its test job on the
-  admin-runner `/Applications` issue — FIXED in `test/roundtrip.sh` (28/28
-  locally, 2026-08-13); the session's push to `main` re-triggers it
-  automatically. Verify `gh release view v0.2.0` + assets, then add the
-  `TAP_TOKEN` secret so the tap formulae publish too. FamiStudio cask DONE
-  and live at 4.5.3. Fresh-agent pickup: `HANDOFF.md` at the repo root.
+- **Release pipeline — NOT live (2026-08-15 check)**: first run
+  (`31548908050`) failed its test job on the admin-runner `/Applications`
+  issue — FIXED in `test/roundtrip.sh` (28/28 locally). The re-trigger run
+  (`31757347428`) was then **blocked by GitHub account billing** ("recent
+  account payments have failed or your spending limit needs to be
+  increased") — jobs never started, and `gh release view v0.2.0` finds no
+  release. Until billing is resolved, publish manually (local build →
+  `gh release create v0.2.0` → `scripts/update-tap.sh` with a `TAP_TOKEN`
+  PAT). See `HANDOFF.md` → 2026-08-15 section. FamiStudio cask DONE and
+  live at 4.5.3. Fresh-agent pickup: `HANDOFF.md` at the repo root.
 - **Unity Editor rootless install test** (user request, in progress): pkg
   fully downloaded at `~/Downloads/Unity-6000.3.22f1.pkg` (5,133,313,381
   bytes) from `MacEditorInstaller/Unity.pkg` (hash `1c726e1fb402`, LTS
@@ -76,7 +80,9 @@
   28/28; generated formulas pass `brew style` (0 offenses), `brew install`
   and `brew test` via a throwaway local tap (then untapped, no residue).
 - To activate: commit + push, add `TAP_TOKEN` secret, then
-  `brew install ksl-testing/tap/repkgr`.
+  `brew install ksl-testing/tap/repkgr`. ⚠️ As of 2026-08-15 CI is blocked
+  by GitHub account billing (runs don't start) — see the Outstanding note
+  above + `HANDOFF.md` for the manual publish path.
 
 ## Housekeeping notes
 - `test/make-fixture.sh` builds the fast fixture (`/tmp/repkger-fixture/mini.pkg`);

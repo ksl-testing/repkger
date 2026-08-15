@@ -4,6 +4,36 @@ A cacheless agent can pick up from this file. Read `README.md`, `llms.md`,
 `llms/STATUS.md`, `llms/ROADMAP.md`, and `NOTES.md` for depth; this is the
 state + next steps.
 
+## Session update (2026-08-15) — CI runs BLOCKED by GitHub billing; no release yet
+
+Checked live 2026-08-15 (`gh run list` / `gh run view`): the fixed pipeline
+has NOT produced a release. Two runs exist on `main`:
+
+- Run **31548908050** (push of `ff70de3`) — FAILED in `test`: the real
+  admin-runner `/Applications` issue (fixed below).
+- Run **31757347428** (push of `20ca6d7`, which carries the `test/roundtrip.sh`
+  fix) — **job not started**: GitHub's annotation says *"recent account
+  payments have failed or your spending limit needs to be increased"* — the
+  Actions jobs never ran. This is an ACCOUNT/BILLING block, not a code or
+  workflow issue.
+- `gh release view v0.2.0` → **release not found**. `TAP_TOKEN` still not set.
+
+So the pipeline is code-ready (28/28 locally) but GitHub Actions is currently
+unusable for this account. Until billing is resolved, publish manually from
+this Mac (no Actions minutes):
+
+```bash
+# build assets the way the workflow would (make-app.sh + CLI zip + SHA256SUMS)
+# then, from inside the repo:
+gh release create v0.2.0 <Repkger-0.2.0.app.zip> <repkger-0.2.0.zip> <repkger> <SHA256SUMS.txt>
+# or refresh an existing release with gh release upload
+# then push the formula:
+#   add a PAT as the TAP_TOKEN secret on ksl-testing/repkger, then
+scripts/update-tap.sh   # renders tap/repkgr.rb + repkger.rb alias → ksl-testing/homebrew-tap
+```
+
+Re-check `gh run list --repo ksl-testing/repkger` after billing is fixed.
+
 ## Session update (2026-08-13) — committed + pushed
 
 - **GUI upgraded for multi-file use**: `gui/Repkger.applescript` open dialog
@@ -74,9 +104,13 @@ tap/test/workflow) or manual `gh workflow run build-release.yml`:
   (and dequarantine then walked it — 9.5 min job). **Fixed**:
   `test/roundtrip.sh` phase 1 now pins `--map` for `/Applications`,
   `/Library`, `/usr/local` to the scratch home (deterministic on every
-  machine; verified 28/28 locally). Re-trigger with
-  `gh workflow run build-release.yml --repo ksl-testing/repkger`, then
-  `gh release view v0.2.0 --repo ksl-testing/repkger`.
+  machine; verified 28/28 locally).
+- **Since 2026-08-15 the pipeline cannot run at all**: the re-trigger run
+  (31757347428, push of `20ca6d7`) was **blocked by GitHub account
+  billing** ("recent account payments have failed or your spending limit
+  needs to be increased") — jobs never started. `v0.2.0` does NOT exist yet.
+  See the 2026-08-15 section at the top of this file for the manual
+  publish path and the billing re-check.
 - **Needs one secret to go live end-to-end**: add a PAT (repo scope) as the
   `TAP_TOKEN` secret on `ksl-testing/repkger`. Without it the release still
   publishes; the tap step prints a skip notice. With it,
