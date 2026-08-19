@@ -80,15 +80,22 @@ Full procedure in `llms.md` → "Old v0.1.0 damage reversal". Also consider a
   so `scripts/update-tap.sh` pushes the formula; then
   `brew install ksl-testing/tap/repkgr` on a clean machine.
 
-## 6. Unity Editor rootless install test (user-requested verification)
-The user wants to skip Unity Hub and extract the editor .pkg to ~/
-locations. Pkg ready: `~/Downloads/Unity-6000.3.22f1.pkg` (LTS 6000.3.22f1,
-5,133,313,381 bytes) from
-`https://download.unity3d.com/download_unity/1c726e1fb402/MacEditorInstaller/Unity.pkg`.
-Plan: `inspect --files 15` (confirm payload layout), then
-`install --home $HOME --yes`, launch Unity.app once, `list` + `uninstall` to
-verify reversal. See HANDOFF pending 1. On success, add Unity to the README
-"Validated" list.
+## 6. ~~Unity Editor rootless install test~~ — ✅ DONE (2026-08-18, v0.3.0)
+User wanted: download + extract the editor the way Unity Hub would with
+`~/Applications` selected, by redoing the BOM to accessible no-sudo locations.
+Delivered via the new **`bom-redo`** command (BOM + payload repacked per
+mapping boundary): ARM64 pkg → rootless pkg rooted at
+`$HOME/Applications/Unity/Hub/Editor/6000.3.22f1` (byte-for-byte the Hub
+layout) → plain install → launch → uninstall. Full details: README
+"Validated", HANDOFF 2026-08-18, NOTES.md. On the way, fixed: `*.pkg.tmp`
+component discovery, Distribution-version fallback (Unity's PackageInfo
+version is `0`), under-home map_path rule, dir-pkg sha256, bundle .mpkg
+expansion, and the ditto top-level-symlink dereference bug.
+
+Natural follow-ups: make the Unity flow a one-liner
+(`repkger bom-redo … --map …` could ship a `--hub-parity` preset for
+`/Applications/Unity/Unity`), add the rootless pkg to the GUI's install flow,
+and consider auto-deleting the downloaded pkg after a successful bom-redo.
 
 ## Ideas parked
 - `--run-scripts` hardening: run pre/postinstall with a sandboxed home-rooted

@@ -28,7 +28,8 @@
   would keep the fixture in the real `/Applications`. 28/28 locally.
 - **Synthetic fixture** (`test/make-fixture.sh`, 3.7 KB pkg): full
   install → uninstall round-trip (25 files recorded incl. `_CodeSignature`,
-  all reversed; `/Users/Shared` + `/tmp` kept in place and cleaned).
+  all reversed; `/Users/Shared` + `/tmp` kept in place and cleaned; a
+  top-level symlink is preserved through merge + uninstall).
 - pkg sha256 GameMaker `8cbd33a9…cc7f` (matches upstream homebrew cask) was
   verified at v0.1.0; fixture re-testing covers the loop since.
 
@@ -56,10 +57,22 @@
   `scripts/release-gh.sh` (non-working placeholder). Tap formula still needs
   a `TAP_TOKEN` PAT. See `HANDOFF.md` → 2026-08-15 section. FamiStudio cask
   DONE and live at 4.5.3. Fresh-agent pickup: `HANDOFF.md` at the repo root.
-- **Unity Editor rootless install test** (user request, in progress): pkg
-  fully downloaded at `~/Downloads/Unity-6000.3.22f1.pkg` (5,133,313,381
-  bytes) from `MacEditorInstaller/Unity.pkg` (hash `1c726e1fb402`, LTS
-  6000.3.22f1). Install test not yet run — steps in `HANDOFF.md` pending 1.
+- **Unity Editor rootless install test — DONE (2026-08-18, v0.3.0)**: full
+  Unity-Hub-parity flow via the new **`repkger bom-redo`** command (BOM redone
+  to the mapped no-sudo locations and repacked with pkgbuild). ARM64 pkg
+  (5,107,849,173 bytes, md5 matches Unity's published hash) → rootless pkg
+  rooted at `$HOME/Applications/Unity/Hub/Editor/6000.3.22f1` → plain install
+  (no --map) → 55,077 files, 201 stale refs rewritten → launched headless
+  once → uninstall reversed everything. See README "Validated" + HANDOFF
+  2026-08-18. `test/roundtrip.sh` 45/45.
+- **New in v0.3.0**: `bom-redo`; bundle-.mpkg expansion; `*.pkg.tmp`
+  component discovery; Distribution-version fallback (Unity stamps PackageInfo
+  version `0`); map_path never re-maps under-home paths; sha256 for dir pkgs;
+  top-level symlink preservation in merge (ditto dereferences them);
+  `--rpkg` brew force flag + `brew()` shim (no silent installer); `--rpkg`
+  handles dmg/zip casks with an inner pkg (mount/unzip → rootless install →
+  cleanup); GUI `choose from list` chooser (fixed 4-button -50 bug) + cask
+  install mode + headless `--cask`. Roundtrip **58/58**.
 - Repkger.app has no custom icon / notarization; progress UI is
   notifications-only (no progress bar yet).
 - Tap casks: the `famistudio` cask is DONE and live at **4.5.3** (rootless

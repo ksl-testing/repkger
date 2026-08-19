@@ -74,6 +74,8 @@ check "quarantine stripped from mapped loc" \
     test -z "$(xattr -p com.apple.quarantine "$H/Applications" 2>/dev/null)"
 check "app landed in \$H/Applications" \
     test -x "$H/Applications/MiniApp.app/Contents/MacOS/miniapp"
+check "top-level symlink preserved" \
+    test -L "$H/Applications/MiniApp-link.app"
 check "/Applications ref rewritten" \
     grep -Fq "$H/Applications/MiniApp.app/Contents/Resources" \
         "$H/Applications/MiniApp.app/Contents/Resources/refs.txt"
@@ -88,6 +90,7 @@ check "record has file entries" \
 
 REPKGER_DATA="$D1" "$R" uninstall "$rec" --yes >/dev/null
 check "uninstall removed app"       test ! -e "$H/Applications/MiniApp.app"
+check "uninstall removed top symlink" test ! -e "$H/Applications/MiniApp-link.app"
 check "uninstall left decoy"        grep -q "decoy payload" "$H/Applications/Decoy.app/Contents/decoy.txt"
 check "uninstall cleaned /Users/Shared" test ! -e /Users/Shared/mini-shared.txt
 check "uninstall cleaned /tmp"      test ! -e /tmp/mini-tmp.txt
@@ -116,6 +119,141 @@ REPKGER_DATA="$D2" "$R" uninstall "$rec2" --yes >/dev/null
 check "phase2 uninstall removed app" test ! -e "$B/Applications/MiniApp.app"
 check "phase2 uninstall cleaned .local" test ! -e "$B/.local"
 check "phase2 uninstall cleaned Library" test ! -e "$B/Library"
+
+echo
+echo "== phase 3: bom-redo — BOM repacked to no-sudo locations, installed WITHOUT --map =="
+H3="$TMP/home3"
+D3="$TMP/data3"
+OUT="$TMP/rootless"
+mkdir -p "$H3"
+# redo the BOM so every destination is the mapped (accessible) location
+REPKGER_DATA="$D3" "$R" bom-redo "$PKG" --home "$H3" --out "$OUT" \
+    --map "/Applications=$H3/Applications" \
+    --map "/Library=$H3/Library" \
+    --map "/usr/local=$H3/.local" \
+    --quiet >/dev/null
+check "bom-redo produced .mpkg"        test -d "$OUT/mini-rootless.mpkg"
+check "mpkg has Distribution"          test -f "$OUT/mini-rootless.mpkg/Contents/Distribution"
+check "mpkg has 5 leaf components"     test "$(ls "$OUT/mini-rootless.mpkg/Contents/Packages"/*.pkg 2>/dev/null | wc -l | tr -d ' ')" -eq 5
+# the redone pkg needs NO --map: every BOM entry is already a writable location
+REPKGER_DATA="$D3" "$R" install "$OUT/mini-rootless.mpkg" --home "$H3" --yes >/dev/null
+check "rootless: app in H3/Applications" test -x "$H3/Applications/MiniApp.app/Contents/MacOS/miniapp"
+check "rootless: top symlink preserved" test -L "$H3/Applications/MiniApp-link.app"
+check "rootless: tool in H3/.local/bin"   test -x "$H3/.local/bin/mini-tool"
+check "rootless: Library in H3/Library"   test -f "$H3/Library/MiniSupport/README.txt"
+check "rootless: keep /Users/Shared"      test -f /Users/Shared/mini-shared.txt
+check "rootless: keep /tmp"               test -f /tmp/mini-tmp.txt
+check "rootless: refs rewritten to H3/.local/bin" \
+    grep -Fq "$H3/.local/bin" "$H3/Applications/MiniApp.app/Contents/Resources/refs.txt"
+
+local_r=""
+for r in "$D3"/records/*; do
+    [ -f "$r/record.tsv" ] || continue
+    REPKGER_DATA="$D3" "$R" uninstall "$r" --yes >/dev/null
+    local_r="$r"
+done
+check "rootless: 5 records uninstalled"  test -n "$local_r"
+check "rootless: uninstalled top symlink"  test ! -e "$H3/Applications/MiniApp-link.app"
+check "rootless uninstall cleared H3"     test -z "$(find "$H3" -mindepth 1 | head -1)"
+check "rootless uninstall cleaned /Users/Shared" test ! -e /Users/Shared/mini-shared.txt
+check "rootless uninstall cleaned /tmp"   test ! -e /tmp/mini-tmp.txt
+
+echo
+echo "== phase 4: brew wrapper --rpkg (force rootless, never installer/sudo) =="
+H4="$TMP/home4"
+D4="$TMP/data4"
+BIN4="$TMP/fakebrew"
+FAKE_LOG="$TMP/brew-calls.log"
+mkdir -p "$H4" "$BIN4"
+# a fake brew that ONLY answers `info --cask <name> --json=v2` (from an env
+# JSON file) and records every invocation — if the wrapper ever execs real
+# brew's install path (installer/sudo), the log shows a non-info call and the
+# test fails. Real brew is never on PATH here.
+cat > "$BIN4/brew" <<'FAKE'
+#!/usr/bin/env bash
+echo "$*" >> "$FAKE_LOG"
+case "$1" in
+    info) cat "$BREW_FAKE_JSON" ;;
+    *) echo "fake brew: unexpected call: $*" >&2; exit 1 ;;
+esac
+FAKE
+chmod +x "$BIN4/brew"
+FAKE_PKG="$BIN4/mini.pkg"
+cp "$PKG" "$FAKE_PKG"
+FSHA=$(shasum -a 256 "$FAKE_PKG" | awk '{print $1}')
+cat > "$BIN4/brew-pkg.json" <<JSON
+{"casks":[{"url":"file://$FAKE_PKG","sha256":"$FSHA"}]}
+JSON
+cat > "$BIN4/brew-other.json" <<JSON
+{"casks":[{"url":"https://example.com/Foo.tar.bz2","sha256":"$FSHA"}]}
+JSON
+: > "$FAKE_LOG"
+check "brew --rpkg: pkg cask installs rootlessly" \
+    env PATH="$BIN4:$PATH" HOME="$H4" REPKGER_DATA="$D4" BREW_FAKE_JSON="$BIN4/brew-pkg.json" FAKE_LOG="$FAKE_LOG" \
+        "$R" brew install --cask --rpkg rpkgtest
+check "brew --rpkg: app landed in HOME/Applications" \
+    test -x "$H4/Applications/MiniApp.app/Contents/MacOS/miniapp"
+check "brew --rpkg: fake brew only saw 'info' (no installer call)" \
+    test "$(grep -vc '^info ' "$FAKE_LOG" || true)" -eq 0
+check "brew --rpkg: record written" \
+    test -n "$(ls -d "$D4"/records/* 2>/dev/null | head -1)"
+REPKGER_DATA="$D4" "$R" uninstall "$(ls -d "$D4"/records/* | head -1)" --yes >/dev/null 2>&1 || true
+rm -f /Users/Shared/mini-shared.txt /tmp/mini-tmp.txt
+
+# --map passthrough: the map must reach the rootless install (e.g. Unity Hub layout)
+mkdir -p "$H4/MappedApps"
+check "brew --rpkg: --map passes through to install" \
+    env PATH="$BIN4:$PATH" HOME="$H4" REPKGER_DATA="$D4" BREW_FAKE_JSON="$BIN4/brew-pkg.json" FAKE_LOG="$FAKE_LOG" \
+        "$R" brew install --cask --rpkg --map "/Applications=$H4/MappedApps" rpkgmap
+check "map case: app landed in mapped dir" \
+    test -x "$H4/MappedApps/MiniApp.app/Contents/MacOS/miniapp"
+REPKGER_DATA="$D4" "$R" uninstall "$(ls -d "$D4"/records/* | head -1)" --yes >/dev/null 2>&1 || true
+rm -f /Users/Shared/mini-shared.txt /tmp/mini-tmp.txt
+
+# unsupported artifact + --rpkg must FAIL LOUD, never fall through to brew
+if env PATH="$BIN4:$PATH" HOME="$H4" REPKGER_DATA="$D4" BREW_FAKE_JSON="$BIN4/brew-other.json" FAKE_LOG="$FAKE_LOG" \
+        "$R" brew install --cask --rpkg notapkg >/dev/null 2>&1; then
+    bad "brew --rpkg: unsupported artifact must die (not fall through to installer)"
+else
+    ok "brew --rpkg: unsupported artifact dies with an error (no silent installer)"
+fi
+check "brew --rpkg: still no installer call" \
+    test "$(grep -vc '^info ' "$FAKE_LOG" || true)" -eq 0
+
+# zip cask that CONTAINS a .pkg
+FAKE_ZIP="$BIN4/FakeCask.zip"
+rm -rf "$BIN4/zippkg" && mkdir -p "$BIN4/zippkg"
+cp "$PKG" "$BIN4/zippkg/mini.pkg"
+( cd "$BIN4/zippkg" && ditto -c -k mini.pkg "$FAKE_ZIP" )
+ZSHA=$(shasum -a 256 "$FAKE_ZIP" | awk '{print $1}')
+cat > "$BIN4/brew-zip.json" <<JSON
+{"casks":[{"url":"file://$FAKE_ZIP","sha256":"$ZSHA"}]}
+JSON
+: > "$FAKE_LOG"
+check "brew --rpkg: zip cask with inner .pkg installs rootlessly" \
+    env PATH="$BIN4:$PATH" HOME="$H4" REPKGER_DATA="$D4" BREW_FAKE_JSON="$BIN4/brew-zip.json" FAKE_LOG="$FAKE_LOG" \
+        "$R" brew install --cask --rpkg rpkgzip
+check "zip case: app landed"        test -x "$H4/Applications/MiniApp.app/Contents/MacOS/miniapp"
+check "zip case: no installer call" test "$(grep -vc '^info ' "$FAKE_LOG" || true)" -eq 0
+REPKGER_DATA="$D4" "$R" uninstall "$(ls -d "$D4"/records/* | head -1)" --yes >/dev/null 2>&1 || true
+rm -f /Users/Shared/mini-shared.txt /tmp/mini-tmp.txt
+
+# dmg cask that CONTAINS a .pkg (mounted read-only, inner pkg installed, detached)
+FAKE_DMG="$BIN4/FakeCask.dmg"
+hdiutil create -volname FakeCask -srcfolder "$BIN4/zippkg" -ov -format UDZO "$FAKE_DMG" >/dev/null 2>&1
+DSHA=$(shasum -a 256 "$FAKE_DMG" | awk '{print $1}')
+cat > "$BIN4/brew-dmg-pkg.json" <<JSON
+{"casks":[{"url":"file://$FAKE_DMG","sha256":"$DSHA"}]}
+JSON
+: > "$FAKE_LOG"
+check "brew --rpkg: dmg cask with inner .pkg installs rootlessly" \
+    env PATH="$BIN4:$PATH" HOME="$H4" REPKGER_DATA="$D4" BREW_FAKE_JSON="$BIN4/brew-dmg-pkg.json" FAKE_LOG="$FAKE_LOG" \
+        "$R" brew install --cask --rpkg rpkgdmg
+check "dmg case: app landed"        test -x "$H4/Applications/MiniApp.app/Contents/MacOS/miniapp"
+check "dmg case: no installer call" test "$(grep -vc '^info ' "$FAKE_LOG" || true)" -eq 0
+check "dmg case: volume detached"   test -z "$(ls -d /Volumes/FakeCask 2>/dev/null || true)"
+REPKGER_DATA="$D4" "$R" uninstall "$(ls -d "$D4"/records/* | head -1)" --yes >/dev/null 2>&1 || true
+rm -f /Users/Shared/mini-shared.txt /tmp/mini-tmp.txt
 
 echo
 echo "roundtrip: $pass passed, $fail failed"

@@ -13,6 +13,13 @@
 #       --files lists up to N BOM entries with their home-mapped destinations.
 #   repkger install <pkg> [options]
 #       Home-rooted install (see options below).
+#   repkger bom-redo <pkg> [--home DIR] [--out DIR] [--map SRC=DEST ...]
+#       Redo the package BOM to no-sudo locations and repack: rebuilds the
+#       payload rooted at the mapped ~/ destinations (pkgbuild), so the
+#       resulting rootless .pkg/.mpkg extracts DIRECTLY to the mapped
+#       locations (no remapping needed) — e.g. /Applications/Unity/Hub/...
+#       -> ~/Applications/Unity/Hub/..., the way Unity Hub would install to
+#       ~/Applications. Default --out: $REPKGER_DATA/rootless.
 #   repkger uninstall <pkg-path|name|record> [--yes] [--purge]
 #       Reverse a repkger install using its recorded file manifest.
 #   repkger list [--json]
@@ -20,7 +27,15 @@
 #   repkger brew [brew args...]
 #       brew wrapper: intercepts `install --cask <name>` for casks whose
 #       artifact is a .pkg (e.g. gamemaker) and installs rootlessly instead;
-#       passes everything else through to the real brew.
+#       passes everything else through to the real brew. Add `--rpkg` to
+#       FORCE the rootless strategy for a pkg cask and NEVER fall through to
+#       brew's pkg installer (which needs sudo). --rpkg also handles dmg/zip
+#       casks that CONTAIN a .pkg/.mpkg (mounted/extracted, inner pkg
+#       installed rootlessly, then cleaned up); any other artifact type dies
+#       loudly instead of falling through:
+#         repkger brew install --cask --rpkg gamemaker
+#       (the `brew()` shim from `repkger self-install` lets you type
+#        `brew install --cask --rpkg gamemaker` directly).
 #   repkger gui [pkg...]
 #       Open the Repkger.app GUI (falls back to a plain prompt otherwise).
 #   repkger self-install [--bash]
@@ -37,6 +52,8 @@
 #                      the rest to ~/
 #   --map SRC=DEST     add/override a mapping (repeatable); SRC and DEST are
 #                      absolute paths, e.g. --map "/usr/local=$HOME/opt"
+#   (bom-redo accepts the same --home/--map/--home-rooted/--keep-writable
+#    options as install, plus --out for the output directory)
 #   --list-only        show what would be installed, change nothing
 #   --no-sign          skip quarantine stripping and code-sign checks
 #                      (stripping removes com.apple.quarantine from each target
@@ -53,7 +70,7 @@
 
 set -euo pipefail
 
-REPKGER_VERSION="0.2.0"
+REPKGER_VERSION="0.3.0"
 REPKGER_DATA="${REPKGER_DATA:-$HOME/.repkger}"
 RECORDS_DIR="$REPKGER_DATA/records"
 CACHE_DIR="$REPKGER_DATA/cache"
@@ -87,7 +104,23 @@ file_size() {  # $1 = path; bytes (0 if unreadable)
     stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null || echo 0
 }
 
-sha256_of() {  # $1 = path; echoes bare hex
+sha256_of() {  # $1 = path; echoes bare hex (dirs: hash of sorted per-file digests)
+    if [ -d "$1" ]; then
+        # bundle .mpkg / legacy pkg dir: deterministic content hash (no paths,
+        # no mtimes — same contents hash the same regardless of location)
+        if command -v shasum >/dev/null 2>&1; then
+            find "$1" -type f -print0 2>/dev/null | sort -z | \
+                xargs -0 shasum -a 256 2>/dev/null | awk '{print $1}' | sort | \
+                shasum -a 256 | awk '{print $1}'
+        elif command -v sha256sum >/dev/null 2>&1; then
+            find "$1" -type f -print0 2>/dev/null | sort -z | \
+                xargs -0 sha256sum 2>/dev/null | awk '{print $1}' | sort | \
+                sha256sum | awk '{print $1}'
+        else
+            echo ""
+        fi
+        return 0
+    fi
     if command -v shasum >/dev/null 2>&1; then
         shasum -a 256 "$1" | awk '{print $1}'
     elif command -v sha256sum >/dev/null 2>&1; then
@@ -118,6 +151,8 @@ DRY=0
 declare -a USER_MAPS=()
 declare -a MERGED_DIRS=()         # exact dirs merged from payloads (for quarantine strip)
 declare -a MAPPED_LOCS=()         # mapped install-location dirs per component (deduped)
+CASK_STAGE=""                    # brew wrapper: extract dir for dmg/zip containers
+CASK_MNT=""                      # brew wrapper: mounted dmg volume
 declare -a INSTALLED_FILES=()     # "dst<TAB>typ<TAB>mode<TAB>uidgid<TAB>size" — the package's OWN files
 
 HOME_ROOT="${HOME_ROOT%/}"
@@ -148,6 +183,16 @@ map_path() {
         src="${best%%=*}"; dst="${best#*=}"
         echo "${dst}${p#"$src"}"
         return 0
+    fi
+
+    # 1b) already under the home root: accessible by definition, never re-map.
+    # Needed for installing repkger-redone (rootless) pkgs whose destinations
+    # are already ~/..., and it protects homes under /var/folders from the
+    # /var default rule below. (--map overrides above still win.)
+    if [ "$HOME_ROOT" != "/" ]; then
+        case "$p" in
+            "$HOME_ROOT"|"$HOME_ROOT"/*) echo "$p"; return 0 ;;
+        esac
     fi
 
     # 2) keep-if-writable (default): the top-level dir of p is writable by us
@@ -215,8 +260,26 @@ expand_pkg() {  # $1 = pkg path; $2 = expand dir; echoes the component root dir
     rm -rf "$dir"
     mkdir -p "$(dirname "$dir")"
     if [ -d "$pkg" ]; then
-        # legacy bundle .mpkg / .pkg (a directory)
-        mkdir -p "$dir"
+        # legacy bundle .mpkg / .pkg (a directory). pkgutil --expand-full
+        # refuses bundle pkgs, so expand each inner flat package into a dir
+        # (component_dirs scans Contents/Packages/*.pkg dirs).
+        mkdir -p "$dir/Contents/Packages"
+        [ -f "$pkg/Contents/Distribution" ] && \
+            cp "$pkg/Contents/Distribution" "$dir/Contents/Distribution" 2>/dev/null || true
+        local inner ok=0 n
+        for inner in "$pkg"/Contents/Packages/*.pkg "$pkg"/*.pkg; do
+            [ -f "$inner" ] || continue
+            n="$dir/Contents/Packages/$(basename "$inner")"
+            rm -rf "$n"
+            if pkgutil --expand-full "$inner" "$n" >/dev/null 2>&1; then
+                ok=1
+            elif command -v xar >/dev/null 2>&1 && \
+                 mkdir -p "$n" && xar -xf "$inner" -C "$n" >/dev/null 2>&1; then
+                ok=1
+            else
+                warn "could not expand inner package: $inner"
+            fi
+        done
         : > "$dir/.repkger-expanded"
         echo "$dir"
         return 0
@@ -240,7 +303,8 @@ component_dirs() {  # $1 = expand root; echoes dirs with PackageInfo
     local root="$1" c
     # single-component packages expand with the component at the root itself
     [ -f "$root/PackageInfo" ] && { echo "$root"; return 0; }
-    for c in "$root"/*.pkg; do
+    # flat component pkgs (Unity names its inner package Unity.pkg.tmp)
+    for c in "$root"/*.pkg "$root"/*.pkg.tmp; do
         [ -f "$c/PackageInfo" ] && echo "$c"
     done
     for c in "$root"/Contents/Packages/*.pkg "$root"/*/Contents/Packages/*.pkg; do
@@ -347,7 +411,15 @@ merge_tree() {
                 continue
             fi
             mkdir -p "$(dirname "$mc")" 2>/dev/null || true
-            ditto "$c" "$mc" 2>/dev/null || die "failed to copy $c -> $mc"
+            if [ -L "$c" ]; then
+                # ditto DEREFERENCES a top-level symlink source and copies the
+                # target as a real dir (e.g. Unity's top-level
+                # "Unity Bug Reporter.app" -> Unity.app/Contents/Helpers/...)
+                # — create the link directly so it stays a symlink
+                ln -s "$(readlink "$c")" "$mc"
+            else
+                ditto "$c" "$mc" 2>/dev/null || die "failed to copy $c -> $mc"
+            fi
             MERGED_DIRS+=("$mc")
             [ "$VERBOSE" -eq 1 ] && say "  merged: ${mc#$HOME_ROOT/}"
         fi
@@ -826,7 +898,9 @@ cmd_install() {
 
     local v
     v=$(comp_version "${comps[0]}")
-    [ -z "$v" ] && v=$(dist_version "$prod_root/Distribution")
+    # Unity stamps PackageInfo version="0" and keeps the real version in the
+    # Distribution — prefer a meaningful version from there
+    case "$v" in ""|0|"<none>") v=$(dist_version "$prod_root/Distribution") ;; esac
     [ -n "$v" ] && ver="$v"
     if [ "${#comps[@]}" -eq 1 ]; then
         local id; id=$(comp_id "${comps[0]}")
@@ -960,6 +1034,230 @@ cmd_install() {
         [ -z "$s2" ] && continue
         say "  script recorded: $s2"
     done < <(grep $'^script\t' "$recfile" 2>/dev/null | cut -f3-4 | sort -u | awk '{print $1" ("$2")"}')
+}
+
+# ---------------------------------------------------------------------------
+# bom-redo — redo the package BOM to the mapped no-sudo locations and repack
+# ---------------------------------------------------------------------------
+# bom_redo_leaves <payload dir> <virtual abs path> — walks the payload tree
+# with the SAME boundary logic as merge_tree and echoes one line per mapping
+# boundary leaf: "<abs src dir><TAB><mapped dest root>". Each leaf is exactly
+# the subtree that lands under a single mapped root, so pkgbuild --root <leaf>
+# --install-location <mapped> reproduces the payload at the no-sudo location.
+bom_redo_leaves() {
+    local src="$1" vpath="$2"
+    shopt -s dotglob nullglob
+    local c rel vc has_boundary=0 b
+    for c in "$src"/*; do
+        [ -e "$c" ] || continue
+        rel="${c##*/}"
+        vc="${vpath%/}/$rel"
+        has_boundary=0
+        # boundary below vc iff some mapping prefix is a descendant of vc
+        while IFS= read -r b; do
+            [ -z "$b" ] && continue
+            case "$b" in
+                "$vc/"*) has_boundary=1; break ;;
+            esac
+        done < <(map_prefixes)
+        if [ "$has_boundary" -eq 1 ]; then
+            bom_redo_leaves "$c" "$vc"
+        else
+            printf '%s\t%s\n' "$c" "$(map_path "$vc")"
+        fi
+    done
+    shopt -u dotglob nullglob
+}
+
+cmd_bom_redo() {
+    local pkg="" out="$REPKGER_DATA/rootless"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --home)        [ $# -ge 2 ] || die "--home needs a value"; HOME_ROOT="$2"; shift 2 ;;
+            --out)         [ $# -ge 2 ] || die "--out needs a value"; out="$2"; shift 2 ;;
+            --map)         [ $# -ge 2 ] || die "--map needs SRC=DEST"; USER_MAPS+=("$2"); shift 2 ;;
+            --home-rooted) KEEP_WRITABLE=0; shift ;;
+            --keep-writable) KEEP_WRITABLE=1; shift ;;
+            --clean)       CLEAN=1; shift ;;
+            --quiet)       QUIET=1; VERBOSE=0; shift ;;
+            -h|--help)     usage 0 ;;
+            -*)            die "unknown option for bom-redo: $1" ;;
+            *)             [ -z "$pkg" ] && pkg="$1" || die "unexpected argument: $1"; shift ;;
+        esac
+    done
+    [ -n "$pkg" ] || die "usage: repkger bom-redo <file.pkg> [--home DIR] [--out DIR] [--map SRC=DEST]"
+    [ -e "$pkg" ] || die "not found: $pkg"
+    HOME_ROOT="${HOME_ROOT%/}"; [ -n "$HOME_ROOT" ] || HOME_ROOT="/"
+    require_cmds pkgbuild
+    command -v mkbom >/dev/null 2>&1 || die "required tool not found: mkbom"
+
+    local sha name ver
+    sha=$(sha256_of "$pkg")
+    name=$(basename "$pkg"); name="${name%.*}"
+    name=$(printf '%s' "$name" | tr ' /:' '_')
+    ver="unknown"
+
+    EXPAND_TMP=$(mktemp -d "${TMPDIR:-/tmp}/repkger-bomredo.XXXXXX")
+    trap 'rm -rf "$EXPAND_TMP"' EXIT
+
+    say "== Expanding $pkg =="
+    local prod_root
+    prod_root=$(expand_pkg "$pkg" "$EXPAND_TMP") || die "cannot expand $pkg"
+
+    local -a comps=()
+    local c
+    while IFS= read -r c; do comps+=("$c"); done < <(component_dirs "$prod_root")
+    [ "${#comps[@]}" -gt 0 ] || die "no components found in $pkg"
+
+    local v
+    v=$(comp_version "${comps[0]}")
+    # Unity stamps PackageInfo version="0" — prefer the Distribution version
+    case "$v" in ""|0|"<none>") v=$(dist_version "$prod_root/Distribution") ;; esac
+    [ -n "$v" ] && ver="$v"
+
+    mkdir -p "$out"
+    say "== Redoing BOM of $(basename "$pkg") to no-sudo locations (root: $HOME_ROOT) =="
+
+    local -a built=()
+    local comp_i=0 idx=0 leaf leafsrc mapped
+    local cid cver loc payload pkgout outname slug
+    for c in ${comps[@]+"${comps[@]}"}; do
+        comp_i=$((comp_i + 1))
+        loc=$(comp_install_loc "$c"); [ -z "$loc" ] && loc="/"
+        payload=$(payload_root "$c")
+        [ -n "$payload" ] || { warn "SKIP $(basename "$c"): no payload"; continue; }
+        if [ ! -d "$payload" ]; then
+            die "payload of $(basename "$c") is a compressed file, not a dir (needs pkgutil --expand-full; try --clean)"
+        fi
+        cid=$(comp_id "$c"); cver=$(comp_version "$c")
+        case "$cver" in ""|0|"<none>") cver="$v" ;; esac
+        [ -z "$cver" ] && cver="1.0"
+        say "== $(comp_display_name "$c" "$prod_root" "$pkg")  install-location: $loc =="
+
+        idx=0
+        while IFS= read -r leaf; do
+            [ -z "$leaf" ] && continue
+            idx=$((idx + 1))
+            leafsrc="${leaf%%$'\t'*}"; mapped="${leaf#*$'\t'}"
+            [ -n "$mapped" ] || continue
+            [ "$mapped" = "/" ] && { warn "SKIP $(basename "$leafsrc"): maps to / (cannot root a repack at /)"; continue; }
+            slug=$(printf '%s' "$mapped" | tr '/' '_' | tr -c 'A-Za-z0-9_.-' '_')
+            pkgout="$out/${name}-${comp_i}-${idx}-${slug}.pkg"
+            rm -f "$pkgout"
+            say "  leaf: $(basename "$leafsrc")  ->  $mapped"
+            local -a pb=()
+            pb+=(--root "$leafsrc" --install-location "$mapped")
+            pb+=(--identifier "$cid")   # same id: rootless leaves of one component merge records
+            pb+=(--version "$cver" --ownership preserve)
+            [ -d "$c/Scripts" ] && pb+=(--scripts "$c/Scripts")
+            if ! pkgbuild "${pb[@]}" "$pkgout" >/dev/null 2>&1; then
+                # scripts may trip pkgbuild (e.g. arch-suffixed names) — retry without
+                if [ -d "$c/Scripts" ] && pkgbuild --root "$leafsrc" --install-location "$mapped" \
+                    --identifier "$cid" --version "$cver" --ownership preserve "$pkgout" >/dev/null 2>&1; then
+                    say "    (built without scripts)"
+                else
+                    die "pkgbuild failed for $(basename "$leafsrc") (-> $mapped)"
+                fi
+            fi
+            built+=("$pkgout")
+        done < <(bom_redo_leaves "$payload" "$loc")
+    done
+
+    [ "${#built[@]}" -gt 0 ] || die "nothing to redo (no mappable payload content)"
+
+    # assemble: single pkg -> <out>/<name>-rootless.pkg ; else .mpkg bundle
+    local final=""
+    if [ "${#built[@]}" -eq 1 ]; then
+        final="$out/${name}-rootless.pkg"
+        rm -f "$final"
+        mv "${built[0]}" "$final"
+    else
+        final="$out/${name}-rootless.mpkg"
+        rm -rf "$final"
+        mkdir -p "$final/Contents/Packages"
+        local i=0 bp
+        for bp in ${built[@]+"${built[@]}"}; do
+            i=$((i + 1))
+            mv "$bp" "$final/Contents/Packages/$(printf '%02d' "$i")-$(basename "$bp")"
+        done
+        write_distribution "$final/Contents/Distribution" "$name" "$ver" "$final/Contents/Packages"
+    fi
+
+    echo ""
+    echo "=== BOM REDONE ==="
+    say "Component version: $ver"
+    say "Output: $final"
+    say "The redone BOM lists every file at its mapped no-sudo destination:"
+    show_redone_bom "$final" | head -25 || true
+    echo ""
+    say "Install it like any pkg: repkger install '$final' --home '$HOME_ROOT' --yes"
+    say "(all destinations are under $HOME_ROOT or already writable, so nothing is re-mapped)"
+}
+
+write_distribution() {  # $1 = dist path; $2 = title; $3 = version; $4 = packages dir
+    local dist="$1" title="$2" ver="$3" pdir="$4" p pkgid refs="" choices=""
+    {
+        echo '<?xml version="1.0" encoding="utf-8"?>'
+        echo '<installer-gui-script minSpecVersion="1">'
+        echo "  <title>$title (rootless)</title>"
+        for p in "$pdir"/*.pkg; do
+            [ -f "$p" ] || continue
+            pkgid=$(pkgbuild_ident "$p")
+            refs="$refs  <pkg-ref id=\"$pkgid\"><install KBytes=\"$(pkgbuild_kbytes "$p")\"/></pkg-ref>\n"
+            choices="$choices  <line choice=\"ch-$pkgid\"/>\n"
+        done
+        echo '  <choices-outline>'
+        printf '%b' "$choices" | sed 's/^/    /'
+        echo '  </choices-outline>'
+        for p in "$pdir"/*.pkg; do
+            [ -f "$p" ] || continue
+            pkgid=$(pkgbuild_ident "$p")
+            echo "  <choice id=\"ch-$pkgid\" title=\"$pkgid\">"
+            echo "    <pkg-ref id=\"$pkgid\"/>"
+            echo '  </choice>'
+        done
+        printf '%b' "$refs"
+        echo '</installer-gui-script>'
+    } > "$dist"
+}
+
+pkgbuild_ident() {  # $1 = component pkg; echoes its identifier from PackageInfo
+    local t
+    t=$(mktemp -d)
+    (cd "$t" && xar -xf "$1" PackageInfo >/dev/null 2>&1)
+    local id
+    id=$(xml_attr "$t/PackageInfo" pkg-info identifier)
+    rm -rf "$t"
+    echo "$id"
+}
+
+pkgbuild_kbytes() {  # $1 = component pkg; echoes install KBytes from PackageInfo
+    local t
+    t=$(mktemp -d)
+    (cd "$t" && xar -xf "$1" PackageInfo >/dev/null 2>&1)
+    local kb
+    kb=$(xml_attr "$t/PackageInfo" payload installKBytes)
+    rm -rf "$t"
+    echo "${kb:-0}"
+}
+
+show_redone_bom() {  # $1 = rootless .pkg or .mpkg; echoes redone BOM entries
+    local t p
+    t=$(mktemp -d)
+    trap 'rm -rf "$t"' RETURN
+    if [ -d "$1" ]; then
+        for p in "$1"/Contents/Packages/*.pkg; do
+            [ -f "$p" ] || continue
+            (cd "$t" && xar -xf "$p" Bom >/dev/null 2>&1)
+            echo "-- $(basename "$p"): $(lsbom "$t/Bom" 2>/dev/null | wc -l | tr -d ' ') entries --"
+            lsbom "$t/Bom" 2>/dev/null | head -12 || true
+        done
+    else
+        (cd "$t" && xar -xf "$1" Bom >/dev/null 2>&1)
+        lsbom "$t/Bom" 2>/dev/null | head -20 || true
+    fi
+    rm -rf "$t"
+    trap - RETURN
 }
 
 # ---------------------------------------------------------------------------
@@ -1128,18 +1426,44 @@ PY
 # ---------------------------------------------------------------------------
 # brew wrapper
 # ---------------------------------------------------------------------------
+# cleanup for the brew wrapper's dmg/zip container handling (EXIT trap):
+# detach a mounted volume, drop the extract dir. No-ops when unused.
+cask_cleanup() {
+    if [ -n "$CASK_MNT" ] && [ -d "$CASK_MNT" ]; then
+        hdiutil detach "$CASK_MNT" >/dev/null 2>&1 \
+            || hdiutil detach -force "$CASK_MNT" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$CASK_STAGE" ] && [ -d "$CASK_STAGE" ]; then
+        rm -rf "$CASK_STAGE"
+    fi
+    CASK_MNT=""; CASK_STAGE=""
+}
+
 cmd_brew() {
     [ $# -gt 0 ] || { warn "usage: repkger brew <brew args...>"; exec brew "$@" 2>/dev/null || true; }
-    local cask="" i
+    # --rpkg = FORCE the rootless repkger strategy for a pkg cask: never fall
+    # through to real brew (which would run the cask's pkg installer with sudo).
+    # --map SRC=DEST is passed through to the rootless install (e.g. Unity Hub
+    # layout: --map "/Applications/Unity/Unity=$HOME/Applications/Unity/Hub/Editor/<ver>").
+    local cask="" i rpkg=0 lastarg="" skipnext=0
+    local -a MAP_ARGS=()
     for i in "$@"; do
         case "$i" in
+            --rpkg) rpkg=1 ;;
+            --map) skipnext=1; MAP_ARGS+=("$i") ;;
+            --map=*) MAP_ARGS+=("$i") ;;
             --cask) cask="next" ;;
             --cask=*) cask="${i#--cask=}" ;;
-            *) if [ "$cask" = "next" ]; then cask="$i"; break; fi ;;
+            *)
+                if [ "$skipnext" -eq 1 ]; then skipnext=0; MAP_ARGS+=("$i"); continue; fi
+                lastarg="$i"; [ "$cask" = "next" ] && cask="$i" ;;
         esac
     done
-    [ "$cask" = "next" ] && cask=""
+    [ "$cask" = "next" ] && cask="$lastarg"   # `brew install X --cask`
     if [ -z "$cask" ]; then
+        if [ "$rpkg" -eq 1 ]; then
+            die "--rpkg needs a cask: repkger brew install --cask --rpkg <name>"
+        fi
         say "no --cask found; passing through to brew"
         exec brew "$@"
     fi
@@ -1153,21 +1477,32 @@ cmd_brew() {
     url=$(printf '%s' "$info" | python3 -c "import json,sys; d=json.load(sys.stdin); c=d['casks'][0]; print(c.get('url') or '')" 2>/dev/null || echo "")
     sha=$(printf '%s' "$info" | python3 -c "import json,sys; d=json.load(sys.stdin); c=d['casks'][0]; print(c.get('sha256') or '')" 2>/dev/null || echo "")
 
-    local is_pkg=0
-    case "$url" in
+    local urlbase="${url%%[?#]*}"    # strip query/fragment for type + filename
+    local is_pkg=0 is_dmg=0 is_zip=0
+    case "$urlbase" in
         *.pkg|*.mpkg) is_pkg=1 ;;
+        *.dmg) is_dmg=1 ;;
+        *.zip) is_zip=1 ;;
     esac
-    if [ "$is_pkg" -eq 0 ]; then
+    if [ "$is_pkg" -eq 0 ] && [ "$is_dmg" -eq 0 ] && [ "$is_zip" -eq 0 ]; then
+        if [ "$rpkg" -eq 1 ]; then
+            # forced mode must NEVER silently run brew's installer — fail loud
+            die "cask '$cask' artifact is not a .pkg/.mpkg/.dmg/.zip (url: ${url:-unknown}); --rpkg only handles pkg artifacts (incl. a .pkg inside a dmg/zip)"
+        fi
         say "cask '$cask' does not install a .pkg (url: ${url:-unknown}) — passing through to brew"
         exec brew "$@"
     fi
 
     say "cask '$cask' installs a .pkg: $url"
-    say "=> intercepting with a rootless repkger install (no admin)"
+    if [ "$rpkg" -eq 1 ]; then
+        say "=> --rpkg: forcing rootless repkger install (no installer, no sudo)"
+    else
+        say "=> intercepting with a rootless repkger install (no admin)"
+    fi
 
     mkdir -p "$DOWNLOADS_DIR"
     local dl dsha got
-    dl="$DOWNLOADS_DIR/$(basename "$url")"
+    dl="$DOWNLOADS_DIR/$(basename "$urlbase")"
     if [ -f "$dl" ]; then
         dsha=$(sha256_of "$dl")
         if [ -n "$sha" ] && [ "$sha" != "no_check" ] && [ "$dsha" != "$sha" ]; then
@@ -1187,8 +1522,43 @@ cmd_brew() {
         say "sha256 OK: $got"
     fi
 
+    # resolve the actual .pkg to install — directly, or inside a dmg/zip
+    # container (the download is verified; the inner pkg is read from the
+    # mount/extract dir, which is cleaned up afterwards)
+    trap cask_cleanup EXIT
+    local pkgfile=""
+    if [ "$is_pkg" -eq 1 ]; then
+        pkgfile="$dl"
+    else
+        say "=> locating the .pkg inside $urlbase"
+        CASK_STAGE=$(mktemp -d "${TMPDIR:-/tmp}/repkger-cask.XXXXXX")
+        if [ "$is_dmg" -eq 1 ]; then
+            CASK_MNT="$CASK_STAGE/mnt"
+            mkdir -p "$CASK_MNT"
+            hdiutil attach "$dl" -nobrowse -readonly -mountpoint "$CASK_MNT" >/dev/null 2>&1 \
+                || die "could not mount $urlbase (hdiutil attach failed)"
+            say "  mounted: $CASK_MNT"
+            pkgfile=$(find "$CASK_MNT" -maxdepth 4 \( -name '*.pkg' -o -name '*.mpkg' \) 2>/dev/null | head -1)
+        else
+            if command -v unzip >/dev/null 2>&1; then
+                unzip -o -q "$dl" -d "$CASK_STAGE" >/dev/null 2>&1 \
+                    || die "could not unzip $urlbase"
+            else
+                ditto -x -k "$dl" "$CASK_STAGE" >/dev/null 2>&1 \
+                    || die "could not unzip $urlbase (ditto)"
+            fi
+            pkgfile=$(find "$CASK_STAGE" -maxdepth 4 \( -name '*.pkg' -o -name '*.mpkg' \) 2>/dev/null | head -1)
+        fi
+        if [ -z "$pkgfile" ]; then
+            cask_cleanup
+            die "no .pkg/.mpkg found inside $urlbase — --rpkg needs a pkg artifact"
+        fi
+        say "  inner pkg: $pkgfile"
+    fi
+
     echo ""
-    "$0" install "$dl" --home "$HOME" --yes
+    "$0" install "$pkgfile" --home "$HOME" --yes ${MAP_ARGS[@]+"${MAP_ARGS[@]}"}
+    cask_cleanup
     echo ""
     say "Done. Cask's own uninstall/zap (from homebrew) for reference:"
     printf '%s' "$info" | python3 -c "
@@ -1261,6 +1631,32 @@ brewpkg() {
   fi
 }
 # use with e.g.:  brewpkg install --cask gamemaker
+
+# brew() shim: `brew install --cask --rpkg <name>` forces the rootless
+# repkger strategy for pkg casks (no installer, no sudo); every other brew
+# call passes straight through to the real brew.
+brew() {
+  local a rpkg=0
+  local -a args=()
+  for a in "$@"; do
+    if [ "$a" = "--rpkg" ]; then
+      rpkg=1
+    else
+      args+=("$a")
+    fi
+  done
+  if [ "$rpkg" -eq 1 ]; then
+    if command -v repkger >/dev/null 2>&1; then
+      command repkger brew "${args[@]}"
+    else
+      echo "brew: --rpkg needs repkger (see 'repkger self-install')" >&2
+      return 1
+    fi
+  else
+    command brew "$@"
+  fi
+}
+# use with e.g.:  brew install --cask --rpkg gamemaker
 # <<< repkger <<<
 FUNC
 )
@@ -1288,13 +1684,15 @@ EOF
     echo ""
     echo "=== repkger self-installed ==="
     echo "  CLI:      $link  (add $HOME/bin to your PATH if not already)"
-    echo "  function: brewpkg() in $shell_rc — open a new shell to use it"
+    echo "  functions: brewpkg() + brew() shim in $shell_rc — open a new shell"
+    echo "             to use them (brew() only intercepts --rpkg, passes everything else through)"
     echo ""
     echo "Examples:"
     echo "  repkger inspect ~/Downloads/GameMaker-2024.14.4.222.pkg"
     echo "  repkger install ~/Downloads/GameMaker-2024.14.4.222.pkg"
-    echo "  brewpkg install --cask gamemaker        # rootless pkg install"
-    echo "  repkger uninstall com.yoyogames.gms2    # undo an install"
+    echo "  brew install --cask --rpkg gamemaker   # force rootless pkg install"
+    echo "  brewpkg install --cask gamemaker       # same, without the brew() shim"
+    echo "  repkger uninstall com.yoyogames.gms2   # undo an install"
 }
 
 # ---------------------------------------------------------------------------
@@ -1312,6 +1710,7 @@ main() {
     case "$cmd" in
         inspect)       cmd_inspect "$@" ;;
         install)       cmd_install "$@" ;;
+        bom-redo)      cmd_bom_redo "$@" ;;
         uninstall)     cmd_uninstall "$@" ;;
         list)          cmd_list "$@" ;;
         brew)          cmd_brew "$@" ;;

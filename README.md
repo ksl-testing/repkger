@@ -37,9 +37,11 @@ on the web / mobile app).
 bin/repkger inspect  ~/Downloads/GameMaker-2024.14.4.222.pkg   # read it like Suspicious Package
 bin/repkger inspect  ~/Downloads/GameMaker-2024.14.4.222.pkg --files 25   # + where each file lands
 bin/repkger install  ~/Downloads/GameMaker-2024.14.4.222.pkg   # home-rooted install
+bin/repkger bom-redo ~/Downloads/GameMaker-2024.14.4.222.pkg   # repack BOM+payload to ~/ locations
 bin/repkger list                                                # installed records
 bin/repkger uninstall com.yoyogames.gms2 --yes                  # reverse an install
 bin/repkger brew --cask gamemaker                               # rootless install of a pkg-style cask
+brew install --cask --rpkg gamemaker                            # same, with the brew() shim alias
 bin/repkger gui                                                 # open the Repkger.app GUI
 bin/repkger self-install                                        # symlink into ~/bin + brewpkg() in ~/.zshrc
 ```
@@ -61,8 +63,9 @@ script (macOS bash 3.2 compatible). Drop it on your `PATH` (or
 
 ```bash
 scripts/make-app.sh                       # -> build/Repkger.app
-open -a build/Repkger.app                 # mode chooser (Inspect / Install / Uninstall)
+open -a build/Repkger.app                 # mode chooser (see below)
 open -a build/Repkger.app some.pkg        # or drop .pkg files on the app icon
+osascript build/Repkger.app --cask gamemaker   # headless: rootless cask install (--rpkg)
 ```
 
 The app is self-contained (the CLI lives inside the bundle) and portable —
@@ -70,7 +73,12 @@ drag it anywhere, even off a USB stick. It processes packages **independently**:
 drop several `.pkg` files on the icon, or open the app and pick one or many
 files (Cmd-click to multi-select in the open dialog) — each one is inspected
 or installed on its own, with `(1 of N)` progress notifications, and a failure
-on one doesn't stop the rest.
+on one doesn't stop the rest. The mode chooser is a list: install a `.pkg`,
+inspect a `.pkg`, uninstall an installed one, or **install a brew cask
+rootlessly** (prompts for the cask name and runs `repkger brew install --cask
+--rpkg <name>` — never brew's pkg installer, no sudo). Headless:
+`--install <pkg> [--home dir] [--data dir]`, `--inspect <pkg>`, and
+`--cask <name> [--data dir]`.
 
 `make-app.sh` does the whole assembly:
 
@@ -91,7 +99,7 @@ picked up automatically). The result is a standard macOS bundle — drag it to
 
 ```bash
 test/make-fixture.sh                       # builds a tiny mini.pkg (no downloads)
-bash test/roundtrip.sh                     # 28 checks: install -> uninstall round-trip
+bash test/roundtrip.sh                     # 51 checks: install -> uninstall round-trip + bom-redo + --rpkg
 ```
 
 ### Building the distributable artifacts
@@ -113,6 +121,22 @@ and posts a notification when done. The CLI is embedded in the app bundle
 - **GameMaker 2024.14.4.222** (single component `com.yoyogames.gms2`,
   `/Applications`, 17,480 BOM entries, ~800 MB payload): `inspect` + `install`
   + `uninstall` all verified end-to-end (2026-08-10, v0.1.0).
+- **Unity Editor 6000.3.22f1 (Apple silicon)** (2026-08-18, v0.3.0): the full
+  Unity-Hub-parity flow, done by **redoing the BOM**. Downloaded the
+  `MacEditorInstallerArm64/Unity-6000.3.22f1.pkg` (5,107,849,173 bytes;
+  md5 matches Unity's published digest `revO9paHvxhkIn7BzWb6BA==`, sha256
+  `a60e4a44…98d6a`) → `repkger bom-redo … --map
+  "/Applications/Unity/Unity=$HOME/Applications/Unity/Hub/Editor/6000.3.22f1"`
+  → a single flat rootless pkg whose BOM + payload are rooted at
+  `~/Applications/Unity/Hub/Editor/6000.3.22f1` (byte-for-byte the layout
+  Unity Hub produces when you pick `~/Applications`) → `repkger install` of
+  that pkg (no `--map` needed; every destination is already under `$HOME`)
+  → 55,077 files landed, 201 stale `/Applications/Unity/…` refs rewritten,
+  editor launched headless once (`-batchmode -quit`; connected to the
+  licensing client, exited cleanly with the expected unlicensed message) →
+  `repkger uninstall` reversed everything. Unity quirk handled: the inner
+  component is `Unity.pkg.tmp` and its `PackageInfo` version is `0` (the real
+  version lives in the Distribution) — both now handled by repkger.
 - **Synthetic fixture** (fast, no downloads): `test/make-fixture.sh` builds a
   tiny `mini.pkg` covering `/Applications` (+ a real `.app` bundle with stale
   path refs, a symlink, a `--prefix=`-style ref), `/Library`,
@@ -151,6 +175,15 @@ and posts a notification when done. The CLI is embedded in the app bundle
 - Record: `~/.repkger/records/<id>-<ver>-<sha8>/record.tsv` — the BOM of what
   actually landed (skips `._*` AppleDouble that pkgutil folds into xattrs) →
   deterministic `uninstall`.
+- **BOM redo** (`bom-redo`): walks the payload with the same boundary logic as
+  the merge, and for each mapping boundary re-runs `pkgbuild --root <subtree>
+  --install-location <mapped-dir>` (plus a minimal Distribution when there are
+  several leaves). The result is a rootless `.pkg`/`.mpkg` whose **BOM and
+  payload are already rooted at the accessible no-sudo locations** — installing
+  it is a plain extraction with nothing re-mapped (and no stale refs to fix,
+  since the rewrite is idempotent anyway). E.g. the Unity editor pkg becomes a
+  pkg that installs directly to `~/Applications/Unity/Hub/Editor/<ver>/`,
+  exactly like Unity Hub with `~/Applications` selected.
 - Scripts: never run by default; recorded (name + md5) for auditing;
   `--run-scripts` opts in.
 
@@ -164,6 +197,31 @@ REPKGER_DATA=/tmp/rk-data bin/repkger install /tmp/repkger-fixture/mini.pkg --ho
 REPKGER_DATA=/tmp/rk-data bin/repkger uninstall com.test.miniapp --yes
 find /tmp/rk-home | wc -l                  # expect 1
 ```
+
+## Forcing rootless extraction for pkg casks (`brew … --rpkg`)
+
+Casks whose downloaded artifact is a `.pkg` normally install via brew's `pkg`
+DSL, which runs `installer` and prompts for an admin password. repkger's brew
+wrapper intercepts those automatically; add **`--rpkg`** to make that the
+*only* behavior for a cask — it never falls through to brew's installer and
+errors out (instead of silently running it) if the artifact isn't a `.pkg`.
+`--rpkg` also handles **dmg/zip casks that contain a `.pkg`/`.mpkg` inside**:
+the archive is downloaded + hash-verified, mounted (`hdiutil attach -readonly`)
+or unzipped, the inner package is installed rootlessly, and the mount/extract
+dir is cleaned up (no leftover volumes). Any other artifact type — or a
+container with no `.pkg` inside — fails loudly:
+
+```bash
+repkger self-install                 # installs the brew() shim into ~/.zshrc
+brew install --cask --rpkg gamemaker # -> rootless repkger install, no sudo
+# without the shim, the same thing works as:
+repkger brew install --cask --rpkg gamemaker
+# or the pre-existing wrapper:
+brewpkg install --cask gamemaker
+```
+
+The `brew()` shim passes every other `brew` call straight through to the real
+Homebrew — it only intercepts invocations that contain `--rpkg`.
 
 ## FamiStudio cask (ksl-testing/tap) — integration showcase
 

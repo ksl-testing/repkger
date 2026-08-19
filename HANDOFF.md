@@ -4,6 +4,114 @@ A cacheless agent can pick up from this file. Read `README.md`, `llms.md`,
 `llms/STATUS.md`, `llms/ROADMAP.md`, and `NOTES.md` for depth; this is the
 state + next steps.
 
+## Session update (2026-08-18) — Unity Editor test COMPLETE + `bom-redo` (v0.3.0)
+
+The user-requested **Unity Editor rootless install test is DONE** — see
+README "Validated". The pkg had been deleted from `~/Downloads` to save space,
+so it was re-downloaded (ARM64 build, the one Unity Hub itself would fetch on
+this Apple-silicon Mac):
+`https://download.unity3d.com/download_unity/1c726e1fb402/MacEditorInstallerArm64/Unity-6000.3.22f1.pkg`
+(5,107,849,173 bytes; md5 `revO9paHvxhkIn7BzWb6BA==` matches Unity's published
+hash; sha256 `a60e4a44c2463edd63a6d172361c873e7e57d4c6e7eb443da2a95602cc598d6a`).
+Still in `~/Downloads/Unity-6000.3.22f1-arm64.pkg`.
+
+The user asked for the extraction to be done "the way Unity Hub would had I
+selected ~/Applications, by redoing the bom to match accessible no sudo
+locations" → new **`repkger bom-redo`** command (v0.3.0): redoes the BOM to the
+mapped no-sudo locations and repacks (pkgbuild per mapping boundary; flat
+`-rootless.pkg` for one leaf, `.mpkg` bundle otherwise). Unity run:
+`bin/repkger bom-redo <pkg> --map "/Applications/Unity/Unity=$HOME/Applications/Unity/Hub/Editor/6000.3.22f1"`
+→ `~/.repkger/rootless/Unity-6000.3.22f1-arm64-rootless.pkg` (install-location
+`$HOME/Applications/Unity/Hub/Editor/6000.3.22f1` — byte-for-byte the Unity Hub
+layout) → plain `repkger install` (no --map) → 55,077 files, 201 stale refs
+rewritten, launched headless once (`-batchmode -quit`, clean exit), uninstall
+reversed everything. `test/roundtrip.sh` now 45/45 (phase 3 = bom-redo
+round-trip; fixture gained a top-level symlink regression check).
+
+Bugs found + fixed along the way:
+- `component_dirs` missed `*.pkg.tmp` (Unity's inner component name).
+- Unity stamps `PackageInfo version="0"`; install/bom-redo now prefer the
+  Distribution version (record reads `6000.3.22f1`).
+- `map_path` could re-map paths already under `$HOME` (e.g. homes under
+  `/var/folders` hit the `/var` rule) — new rule 1b keeps under-home paths.
+- `sha256_of` failed on directory pkgs (bundle `.mpkg`); now hashes contents.
+- `expand_pkg` now expands the inner packages of bundle `.mpkg` dirs (pkgutil
+  refuses them directly).
+- **`ditto` dereferences a top-level symlink source** (copies the target as a
+  real dir) — Unity's top-level `Unity Bug Reporter.app` symlink was
+  materialized; merge_tree now creates top-level symlinks directly. The one
+  leftover from the real install (a dir copy + launch-created `UnityLockfile`/
+  `UserSettings`/`Logs`) was cleaned by hand.
+- `show_redone_bom | head` SIGPIPE'd under pipefail (exit 141) — guarded.
+
+Version bumped to **0.3.0** (feature). NOT committed; nothing pushed.
+`~/Applications/Unity` is gone; record purged. Artifacts kept: the original
+pkg + the rootless pkg in `~/.repkger/rootless/`.
+
+Same session, second request: **`brew … --rpkg` alias** (user wants
+`brew install --cask --rpkg unity-editor|gamemaker` to force the rootless
+strategy for pkg casks and never silently run brew's `installer`/sudo).
+Implemented: `--rpkg` force flag in the `repkger brew` wrapper (non-pkg
+artifact → loud die, never fall through; `--cask` before or after the name),
+plus a `brew()` shim appended by `repkger self-install` that strips `--rpkg`
+and routes to `repkger brew`, passing every other brew call through (bash +
+zsh verified). `test/roundtrip.sh` phase 4 (fake `brew` that only answers
+`info`) proves: pkg cask installs rootlessly into `$HOME`, brew only ever saw
+`info` (no installer path), non-pkg + `--rpkg` dies. **51/51.** Docs updated
+(README, NOTES). GUI rebuilt.
+
+Note for later: there is no official `unity-editor` brew cask — `--rpkg` works
+with any cask whose artifact is a `.pkg` (e.g. `gamemaker`, `xquartz`); for
+Unity, a cask would need to be added to the tap (or use the direct
+`bom-redo` flow).
+
+Fourth request, same session: **`--rpkg` now handles dmg/zip casks containing a
+`.pkg`**. `cmd_brew` detects `.dmg`/`.zip` (query-stripped URL), downloads +
+sha-verifies, then mounts (`hdiutil attach -readonly -mountpoint` to a temp
+dir) or unzips (`unzip`, `ditto -x -k` fallback), finds the inner `.pkg`/
+`.mpkg` (maxdepth 4), installs it rootlessly, and `cask_cleanup` (EXIT trap)
+detaches/drops the temp dir. Containers with no pkg inside die loudly; other
+extensions die loudly too (never fall through to brew's installer). Roundtrip
+phase 4 now 13 checks: direct pkg, zip-with-pkg, dmg-with-pkg (incl. "volume
+detached"), unsupported-artifact die, and fake-brew sees only `info`
+throughout. **58/58.**
+
+Third request, same session: **`--rpkg` passthrough in the Repkger.app GUI**.
+The mode chooser now has a "Install a brew cask (--rpkg, rootless)" list item
+(`doCaskPrompt` → `doCaskInstall`) plus a headless `--cask <name> [--data
+<dir>]` mode, both running `repkger brew install --cask --rpkg <name>`. Along
+the way FIXED a real GUI bug: the old mode chooser used a 4-button
+`display dialog`, but AppleScript allows at most 3 buttons (-50 at runtime) —
+replaced with `choose from list`. Verified headless: `osascript build/
+Repkger.app --cask rpkgtest` against the fake brew installs rootlessly (brew
+sees only `info`); `--install` regression passed; droplet stays alive showing
+the list chooser (no -50). GUI rebuilt. Docs: README + NOTES item 10.
+
+## Session update (2026-08-18) — v0.3.0 shipped manually; production app + tpl-bootkit
+
+**Unity Editor test completed + cask pipeline live.** v0.3.0 adds `bom-redo`
+(rewrite a pkg's BOM to home-mapped no-sudo locations, so extraction matches
+Unity Hub's `~/Applications/Unity/Hub/Editor/<ver>` layout) and the `--rpkg`
+brew flow (`brew install --cask --rpkg <cask>`; dmg/zip-with-inner-pkg now
+supported). Bugs fixed en route: `ditto` dereferencing top-level symlink
+sources, `component_dirs` missing Unity's `Unity.pkg.tmp`, `PackageInfo
+version="0"` fallback, `/var` re-map of home paths. Roundtrip suite 58/58;
+GUI gained a Cask-install mode + headless `--cask` (4-button dialog was broken
+— AppleScript max is 3 — replaced with `choose from list`).
+
+- **Cask**: `ksl-testing/homebrew-tap` now ships `Casks/unity-editor.rb`
+  (arm64 MacEditorInstaller pkg, sha-verified, LTS-stream livecheck via
+  `services.api.unity.com`, weekly `update-unity-editor.yml` updater) + `--map`
+  passthrough in the brew wrapper. `brew install --cask --rpkg unity-editor`
+  works end-to-end (verified: install, headless launch, uninstall).
+- **Production app**: `~/Applications/noren/repkgr/Repkger.app` (0.3.0),
+  synced by `bin/repkger.sh` in tpl-bootkit (CLI-only with `--cli`).
+- **v0.3.0 published MANUALLY via gh CLI** (no Actions): `scripts/make-app.sh`
+  → zip `build/Repkger.app` → `gh release create v0.3.0 --title ... --notes ...`
+  with the zip attached. Re-run those same commands for the next bump.
+- **Artifacts on disk**: `~/Downloads/Unity-6000.3.22f1-arm64.pkg` and
+  `~/.repkger/rootless/Unity-6000.3.22f1-arm64-rootless.pkg` (~10 GB total).
+
 ## Session update (2026-08-15) — CI BLOCKED by billing; v0.2.0 published manually via gh
 
 Checked live 2026-08-15 (`gh run list` / `gh run view`): GitHub Actions runs
@@ -165,15 +273,11 @@ Manual run example:
 
 ## Pending / next steps
 
-1. **Unity Editor rootless install test** (user request; pkg is ready at
-   `~/Downloads/Unity-6000.3.22f1.pkg`). Verify sha256 first, then:
-   `bin/repkger inspect <pkg> --files 15`, then
-   `bin/repkger install <pkg> --home $HOME --yes` (this lands
-   `~/Applications/Unity/Hub/Editor/6000.3.22f1/Unity.app` or similar —
-   confirm the actual payload layout with `inspect --files` first), launch
-   the editor once (`open ~/Applications/…/Unity.app`), then `repkger list` +
-   `repkger uninstall` to verify reversal. The pkg is ~5 GB so give the
-   CLI 10+ min; the GUI's `doInstall` timeout is 3600 s.
+1. ~~**Unity Editor rootless install test**~~ ✅ **DONE (2026-08-18, v0.3.0)** —
+   full detail in the session update above + README "Validated". Both the
+   original pkg and the rootless pkg are on disk if you want to re-verify;
+   note the install pass takes >10 min on this machine (the 600 s CLI cap
+   timed out mid-rewrite on the first attempt — re-running is idempotent).
 2. **Release** — ~~publish v0.2.0~~ ✅ DONE manually via gh CLI (2026-08-15;
    no Actions quota): `gh release view v0.2.0 --repo ksl-testing/repkger`
    (assets: `Repkger-0.2.0.app.zip`, `repkger-0.2.0.zip`, raw script,

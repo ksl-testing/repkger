@@ -66,6 +66,9 @@ stale refs to rewrite:
 TXT
 
 ln -s refs.txt "$payload/Applications/MiniApp.app/Contents/Resources/rel-link"
+# top-level symlink (regression: ditto dereferences a top-level symlink source
+# and copies its target as a real dir, which breaks record/uninstall symmetry)
+ln -s MiniApp.app "$payload/Applications/MiniApp-link.app"
 
 # --- other roots ------------------------------------------------------------
 cat > "$payload/usr/local/bin/mini-tool" <<'SH'

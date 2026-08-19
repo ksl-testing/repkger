@@ -42,16 +42,38 @@
    dirs (only if empty).
 9. **brew wrapper**: parses `brew info --cask X --json=v2`; if url is a
    `.pkg`/`.mpkg`, downloads to `~/.repkger/downloads`, verifies sha256,
-   calls `install`; else execs real brew.
+   calls `install`; else execs real brew. **`--rpkg`** (v0.3.0) FORCES the
+   rootless strategy for a pkg cask and never falls through: an unsupported
+   artifact dies with an error instead of silently running brew's `installer`
+   (which needs sudo). `--rpkg` also handles **`.dmg`/`.zip` containers with a
+   `.pkg`/`.mpkg` inside**: download + sha256 verify, then mount
+   (`hdiutil attach -nobrowse -readonly -mountpoint` to a temp dir) or unzip
+   (`unzip`, `ditto -x -k` fallback), `find -maxdepth 4` for the inner pkg,
+   rootless-install it, then `cask_cleanup` (EXIT trap) detaches the volume /
+   drops the extract dir. Extension detection strips `?#` from the URL (also
+   used for the download filename). The `brew()` shim installed by
+   `repkger self-install` lets you type `brew install --cask --rpkg gamemaker`
+   — it strips `--rpkg`, routes to `repkger brew`, and passes every other brew
+   call straight through (bash + zsh compatible; guarded when repkger is
+   missing). Cask detection handles `--cask` before or after the name.
+   Roundtrip phase 4 covers: direct pkg, zip-with-pkg, dmg-with-pkg (incl.
+   "volume detached" check), unsupported artifact dies, and brew never sees a
+   non-`info` call in any case.
 10. **GUI** (`gui/Repkger.applescript` + `scripts/make-app.sh`):
     osacompile droplet; embedded CLI in `Contents/Resources/repkger`
     (`cliPath()` finds it via `path to me`); `on open` drop handler →
     Inspect dialog (`inspect --files 20` + Full Report via TextEdit) or
-    Install (`install --home $HOME --yes`); `on run` mode chooser with a
+    Install (`install --home $HOME --yes`); `on run` mode chooser is a
+    **`choose from list`** (NOT buttons — `display dialog` allows at most 3
+    buttons, the old 4-button chooser died with -50 at runtime) with a
     **multi-select** open dialog (`choosePkgs`) — each chosen/dropped .pkg is
     processed independently in a loop with per-file `(i of n)` progress
     notifications (AppleScript has no optional params — `doInstall` takes
     `(p, homeRoot, dataDir, progressLabel)`; every call site passes all 4);
+    **`--rpkg` passthrough (v0.3.0)**: mode chooser gains "Install a brew cask
+    (--rpkg, rootless)" (`doCaskPrompt` → `doCaskInstall(caskName, dataDir)`,
+    runs `repkger brew install --cask --rpkg <name>`) + headless
+    `--cask <name> [--data dir]`;
     headless `--install <pkg> [--home dir] [--data dir]` and
     `--inspect <pkg>` — drive via `osascript`, the droplet binary ignores
     argv; `com.ksl-testing.repkger`, `.pkg`/`.mpkg` doc types, ad-hoc signed;
@@ -65,7 +87,20 @@
     URLs) → update `Formula/repkgr.rb` (+ `repkger.rb` alias) in
     `ksl-testing/homebrew-tap` (create-on-first-run via `gh repo create`,
     needs `TAP_TOKEN` PAT; skips gracefully without it).
-12. **FamiStudio cask** (in `ksl-testing/homebrew-tap`): patched
+13. **BOM redo** (`repkger bom-redo <pkg> [--home] [--out] [--map]`,
+    v0.3.0): redoes the package BOM to the mapped no-sudo locations and
+    repacks. `bom_redo_leaves` walks the payload with the SAME boundary logic
+    as `merge_tree` (a leaf = a subtree under one mapped root); each leaf is
+    rebuilt with `pkgbuild --root <leaf> --install-location <mapped> --ownership
+    preserve` (same component id so records merge; scripts embedded but skipped
+    on failure). One leaf → flat `<name>-rootless.pkg`; several → an `.mpkg`
+    bundle with a generated minimal Distribution. Because every destination is
+    already under `$HOME` (or an already-writable location), `repkger install`
+    of the rootless pkg re-maps NOTHING — the `map_path` "already under home
+    root" rule (1b) makes that exact, and it also protects `--home` under
+    `/var/folders` from the `/var` default rule. `bom-redo` needs the payload
+    as a dir (pkgutil --expand-full).
+14. **FamiStudio cask** (in `ksl-testing/homebrew-tap`): patched
     `main.command` discovers a user-space dotnet (graphical repair prompt if
     missing), strips quarantine/provenance from the bundle + parent on every
     launch, and prefers a bundled .NET **apphost** (generated in postflight
@@ -116,7 +151,25 @@
 - **CI round-trip determinism**: default keep-if-writable keeps `/Applications`
   in place on admin machines (GitHub runners), so `test/roundtrip.sh` phase 1
   pins `--map` for `/Applications`, `/Library`, `/usr/local` to the scratch
-  home — 28/28 on both standard and admin users.
+  home — 45/45 on both standard and admin users.
+- **`ditto` DEREFERENCES a top-level symlink source**: `ditto link.app dst`
+  copies the link TARGET as a real dir (nested symlinks are preserved, only
+  the top-level argument is dereferenced). Unity's pkg has a top-level
+  `Unity Bug Reporter.app` symlink → merge silently materialized it as a dir
+  copy, and uninstall (record says symlink) couldn't remove it. Fix: merge_tree
+  creates top-level symlinks with `ln -s $(readlink $c) $mc`; fixture now
+  carries a top-level symlink regression check.
+- **Unity pkg quirks**: inner component is named `Unity.pkg.tmp` (component_dirs
+  must glob `*.pkg.tmp`); `PackageInfo version="0"` with the real version
+  (`6000.3.22f1`) in the Distribution — both install and bom-redo prefer the
+  Distribution version. install-location `/Applications/Unity`, payload
+  `Unity/Unity.app` + `Unity Bug Reporter.app` symlink; 55,290 BOM entries,
+  ~9.5 GB installed. Unity-Hub layout parity for a chosen folder L is
+  `L/Unity/Hub/Editor/<ver>/Unity.app`, so the parity map is
+  `--map "/Applications/Unity/Unity=$HOME/Applications/Unity/Hub/Editor/<ver>"`.
+- Launch artifacts: Unity writes `UnityLockfile`, `UserSettings/`, `Logs/` into
+  its own bundle's `Contents/MacOS/` at first run — not in the BOM, so
+  uninstall leaves them (harmless, removable).
 
 ## Test fixtures
 
