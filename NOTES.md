@@ -76,8 +76,13 @@
     `--cask <name> [--data dir]`;
     headless `--install <pkg> [--home dir] [--data dir]` and
     `--inspect <pkg>` — drive via `osascript`, the droplet binary ignores
-    argv; `com.ksl-testing.repkger`, `.pkg`/`.mpkg` doc types, ad-hoc signed;
-    version stamped from `bin/repkger`'s `REPKGER_VERSION` by make-app.sh.
+    argv;    `com.ksl-testing.repkger` (default), `.pkg`/`.mpkg` doc types, ad-hoc
+    signed; version stamped from `bin/repkger`'s `REPKGER_VERSION` by
+    make-app.sh. **Name-configurable via env vars** (v0.4.0): APP_NAME,
+    DISPLAY_NAME, BUNDLE_ID, INSTALL_DIR — no script edits needed.
+    Primary build: `APP_NAME=tpl-unwrapper` at `~/applications/`.
+    Plugin build: `APP_NAME="Noren Hodoki"` at `~/applications/noren/`.
+    After install: `lsregister -f` clears cached Gatekeeper rejections.
 11. **Release pipeline + brew tap** (`.github/workflows/release.yml`,
     `scripts/update-tap.sh`, `tap/*.rb` templates): push to `main` (source
     paths) or `workflow_dispatch` → test (fixture round-trip + GUI smoke) →
@@ -100,6 +105,30 @@
     root" rule (1b) makes that exact, and it also protects `--home` under
     `/var/folders` from the `/var` default rule. `bom-redo` needs the payload
     as a dir (pkgutil --expand-full).
+    **v0.4.0 additions** (all `--only`-aware):
+    - **Predictive BOM** (`--preview` / `--list-only`): Suspicious
+      Package-style preview that expands the pkg, walks the leaves, prints
+      every leaf → mapped root with predicted entry counts + a sample of the
+      predicted BOM, plus `script_estimate` output, and returns BEFORE the
+      pkgbuild/mkbom requirement and the `$out` mkdir — nothing is written.
+    - **Targeted multi-level extraction** (`--only PREFIX`, also on
+      `install`): `only_match`/`only_below` prune the payload walk at every
+      level — descend when a prefix lies deeper (even with no mapping boundary
+      there), merge/emit only subtrees at/under a prefix. Relative prefixes
+      are normalized against the component install-location
+      (`set_only_matches`). `--only /Applications` on the fixture → a single
+      flat rootless `.pkg` (1 leaf) whose BOM/install-location are the mapped
+      dir and nothing else.
+    - **Script adjustment**: `script_rewrite_pairs` = payload `rewrite_pairs`
+      MINUS the pure system-tool dirs (`/usr`, `/bin`, `/sbin`) plus all user
+      `--map` pairs — a postinstall still needs `#!/bin/sh` and
+      `/usr/bin/env` to resolve to real system tools. `redo_scripts` copies
+      each script into a stage dir, rewrites it with the same idempotent
+      `rewrite_one` pass, and `pkgbuild --scripts <stage>` embeds the
+      adjusted copies (binary scripts untouched; the pkgbuild-without-scripts
+      fallback stays). `script_estimate` (preview) counts refs that will be
+      home-mapped and flags lines that still need privileges
+      (sudo/chown-root/launchctl/installer/System — cannot be mapped).
 14. **FamiStudio cask** (in `ksl-testing/homebrew-tap`): patched
     `main.command` discovers a user-space dotnet (graphical repair prompt if
     missing), strips quarantine/provenance from the bundle + parent on every
@@ -112,6 +141,31 @@
     autosaves live in `~/Library/Application Support/FamiStudio/` (outside
     the bundle — upgrades can't touch them); postflight symlinks
     `FamiStudio.ini` + `AutoSaves/` into `~/Documents/FamiStudio/`.
+
+## Production build (v0.4.0 — two-tier architecture)
+
+15. **Two-tier app build** (`scripts/make-app.sh` env vars):
+    - `APP_NAME` — .app folder name + CFBundleName (default: Repkger)
+    - `DISPLAY_NAME` — CFBundleDisplayName (default: $APP_NAME)
+    - `BUNDLE_ID` — CFBundleIdentifier (default: com.ksl-testing.repkger)
+    - `INSTALL_DIR` — if set, copies finished .app here + re-signs at target
+    Primary: `APP_NAME=tpl-unwrapper DISPLAY_NAME="TPL Unwrapper"
+    BUNDLE_ID=com.tpl-unwrapper.app INSTALL_DIR="$HOME/applications"`
+    Plugin: `APP_NAME="Noren Hodoki" DISPLAY_NAME="Noren Hodoki"
+    BUNDLE_ID=com.noren-hodoki.app INSTALL_DIR="$HOME/applications/noren"`
+16. **codesign MUST run after plist edits AND the install copy**. The old
+    order (osacompile → plist → codesign → cp to INSTALL_DIR) left the
+    installed copy unsigned → Gatekeeper rejected Finder double-click.
+    Current order: osacompile → embed CLI → plist → icon → codesign →
+    cp to INSTALL_DIR → re-sign installed copy. Verified with
+    `spctl -a -v` and `open -g` (Gatekeeper mode).
+17. **Gatekeeper caches rejections per (bundle-ID, path)**. Ad-hoc signed
+    apps get rejected by `spctl`, and macOS caches the rejection. Rebuilding
+    with the same bundle ID at the same path still fails until the cache is
+    cleared. Fix: `/System/Library/Frameworks/CoreServices.framework/
+    Frameworks/LaunchServices.framework/Support/lsregister -f <app>` after
+    install (added to make-app.sh). Also: `$HOME` expansion + spaces break
+    `open` — use `~/` form in shell scripts.
 
 ## macOS gotchas learned (expensive lessons)
 
@@ -170,6 +224,32 @@
 - Launch artifacts: Unity writes `UnityLockfile`, `UserSettings/`, `Logs/` into
   its own bundle's `Contents/MacOS/` at first run — not in the BOM, so
   uninstall leaves them (harmless, removable).
+
+## Noren Hodoki branding (v0.4.0 — plugin tier)
+
+**Status: ICON + BUILD PIPELINE DONE · RUNTIME INTEGRATION PENDING**
+
+- **Icon**: `gui/NorenHodoki.icns` (kuchinashi gradient `#E07B4E`→`#B85030`, unwrapping knot glyph) — sourced from tpl-bootkit branding/icons/make-svgs.py
+- **Bundle ID**: `com.noren-hodoki.app` (target; default `com.ksl-testing.repkger` for compat)
+- **Display name**: "Noren Hodoki" — the Noren Suite module for rootless package extraction
+- **Install path**: `~/Applications/Noren Hodoki/` via `INSTALL_DIR`
+- **Build command**:
+  ```bash
+  APP_NAME="Noren Hodoki" DISPLAY_NAME="Noren Hodoki" \
+  BUNDLE_ID=com.noren-hodoki.app \
+  INSTALL_DIR="$HOME/Applications/Noren Hodoki" \
+  ./scripts/make-app.sh
+  ```
+- **Post-build quarantine strip**: `xattr -dr com.apple.quarantine/provenance` + `lsregister -u -f` after codesign (prevents Defender deletion of fresh builds)
+- **CLI embedded**: `bin/repkger` at `Contents/Resources/repkger` — unchanged
+
+**Open / Known issues:**
+- Hodoki runtime integration not yet implemented — the app builds and launches, but the Noren Hodoki menu/CLI surface doesn't expose repkger's `bom-redo`/`inspect`/`install` flows yet
+- The AppleScript droplet (`gui/Repkger.applescript`) still uses the "Repkger" mode chooser labels; needs relabel to "Noren Hodoki" + Hodoki-specific actions
+- Bundle ID migration (`com.ksl-testing.repkger` → `com.noren-hodoki.app`) will need a shim for existing users
+- `noren hodoki` CLI alias not yet added to `bin/repkger`
+
+**See also:** tpl-bootkit `branding/HODOKI_BRIEF.md` for full brand identity (kuchinashi gradient, unwrapping metaphor, Noren Suite positioning)
 
 ## Test fixtures
 

@@ -38,6 +38,9 @@ bin/repkger inspect  ~/Downloads/GameMaker-2024.14.4.222.pkg   # read it like Su
 bin/repkger inspect  ~/Downloads/GameMaker-2024.14.4.222.pkg --files 25   # + where each file lands
 bin/repkger install  ~/Downloads/GameMaker-2024.14.4.222.pkg   # home-rooted install
 bin/repkger bom-redo ~/Downloads/GameMaker-2024.14.4.222.pkg   # repack BOM+payload to ~/ locations
+bin/repkger bom-redo ~/Downloads/GameMaker-2024.14.4.222.pkg --preview   # predictive BOM first (like Suspicious Package), builds nothing
+bin/repkger bom-redo ~/Downloads/GameMaker-2024.14.4.222.pkg --only /Applications   # targeted: only that subtree
+bin/repkger install  ~/Downloads/GameMaker-2024.14.4.222.pkg --only /Applications   # targeted direct extraction
 bin/repkger list                                                # installed records
 bin/repkger uninstall com.yoyogames.gms2 --yes                  # reverse an install
 bin/repkger brew --cask gamemaker                               # rootless install of a pkg-style cask
@@ -94,6 +97,36 @@ rootlessly** (prompts for the cask name and runs `repkger brew install --cask
 Drop `gui/Repkger.icns` into the repo to give the app a custom icon (it's
 picked up automatically). The result is a standard macOS bundle — drag it to
 `/Applications`, zip it, or run it straight from `build/`.
+
+### Noren Hodoki (Noren Suite plugin build)
+
+repkger is the engine; **Hodoki (ほどき / 解き)** is the Noren Suite face of that
+engine — the "unwrapping" module for rootless package extraction at the
+threshold.
+
+**Brand assets** (from tpl-bootkit `branding/icons/`):
+- Icon: `gui/NorenHodoki.icns` (kuchinashi gradient `#E07B4E`→`#B85030`, unwrapping knot glyph)
+- Gradient: Kuchinashi (梔子) — warm coral-terracotta, the color of reveal
+- Glyph: Open box flaps + releasing knot (untie, don't cut)
+
+**Build the Noren Hodoki app**:
+```bash
+APP_NAME="Noren Hodoki" DISPLAY_NAME="Noren Hodoki" \
+BUNDLE_ID=com.noren-hodoki.app \
+INSTALL_DIR="$HOME/Applications/Noren Hodoki" \
+./scripts/make-app.sh
+# -> ~/Applications/Noren Hodoki/NorenHodoki.app
+```
+
+**Current status (v0.4.0):**
+- ✅ Icon + build pipeline + post-build quarantine stripping
+- ✅ Configurable bundle ID (`com.noren-hodoki.app` target)
+- ✅ Installs to `~/Applications/Noren Hodoki/` via `INSTALL_DIR`
+- ⚠️ Runtime integration **pending** — the app launches but the AppleScript
+  mode chooser still shows "Repkger" labels; Hodoki-specific actions not yet wired
+- ⚠️ `noren hodoki` CLI alias not yet added to `bin/repkger`
+
+See tpl-bootkit `branding/HODOKI_BRIEF.md` for full brand identity.
 
 ### Running the tests
 
@@ -184,6 +217,28 @@ and posts a notification when done. The CLI is embedded in the app bundle
   since the rewrite is idempotent anyway). E.g. the Unity editor pkg becomes a
   pkg that installs directly to `~/Applications/Unity/Hub/Editor/<ver>/`,
   exactly like Unity Hub with `~/Applications` selected.
+- **Predictive BOM** (`bom-redo --preview` / `--list-only`): Suspicious
+  Package-style preview of the redone package BEFORE anything is built — every
+  mapping-boundary leaf with its home-mapped destination, a sample of the
+  predicted BOM entries (path → `~/` dest), predicted entry counts, and the
+  script estimates. Nothing is written (no pkgbuild).
+- **Targeted multi-level extraction** (`--only PREFIX`, on `bom-redo` and
+  `install`): extract only payload paths at/under PREFIX (absolute, or
+  relative to the component's install-location; repeatable). E.g.
+  `--only /Applications/Unity/Unity` on the Unity pkg redoes just the editor
+  subtree; `bom-redo --only /Applications` yields a single flat rootless
+  `.pkg` instead of a multi-leaf `.mpkg`. Paths that don't match are pruned
+  at every level, so nested boundaries (e.g. `/Library` inside
+  `/Applications/Unity`) are honored.
+- **Script adjustment** (`bom-redo`): the embedded pre/post-install scripts
+  are rewritten so their absolute path references match the new (home-mapped)
+  BOM — `mkdir -p /Applications/…` becomes `mkdir -p ~/Applications/…`,
+  `/Library/…` → `~/Library/…`, `/usr/local/…` → `~/.local/…`. The
+  pure system-tool dirs (`/usr`, `/bin`, `/sbin`) are deliberately left alone
+  so `#!/bin/sh` and `/usr/bin/env` still resolve, and the shebang line is
+  preserved. `--preview` shows the estimate (refs home-mapped + any lines
+  that still need privileges and cannot be mapped: sudo/chown-root/
+  launchctl/installer/System).
 - Scripts: never run by default; recorded (name + md5) for auditing;
   `--run-scripts` opts in.
 
