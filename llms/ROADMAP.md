@@ -97,6 +97,18 @@ Natural follow-ups: make the Unity flow a one-liner
 `/Applications/Unity/Unity`), add the rootless pkg to the GUI's install flow,
 and consider auto-deleting the downloaded pkg after a successful bom-redo.
 
+## 7. ~~Predictive BOM + targeted extraction + script adjustment~~ — DONE (v0.4.0, 2026-08-19)
+User asked for the extractor to be a working product: Suspicious
+Package-style predictive BOM, targeted multi-level extractions, and
+pre/post-install equivalents adjusted to the new `~/` BOM. All in `bin/repkger`
+(v0.4.0, NOT committed/released): `bom-redo --preview|--list-only` (predictive
+BOM, builds nothing), `--only PREFIX` on `bom-redo` + `install` (targeted
+extraction with per-level pruning), and script adjustment (`script_rewrite_pairs`
+= payload pairs minus `/usr` `/bin` `/sbin` + user `--map`s; `redo_scripts`
+embeds the rewritten copies via pkgbuild --scripts; `script_estimate` in
+preview flags unmappable privilege lines). Roundtrip phase 5 (22 checks) →
+82/82. Details: NOTES item 13, HANDOFF 2026-08-19.
+
 ## Ideas parked
 - `--run-scripts` hardening: run pre/postinstall with a sandboxed home-rooted
   env (DSTROOT=$HOME, INSTALL_PREFIX mapped); currently recorded-not-run.

@@ -256,5 +256,71 @@ REPKGER_DATA="$D4" "$R" uninstall "$(ls -d "$D4"/records/* | head -1)" --yes >/d
 rm -f /Users/Shared/mini-shared.txt /tmp/mini-tmp.txt
 
 echo
+echo "== phase 5: predictive BOM, targeted extraction (--only), script adjustment =="
+H5="$TMP/home5"
+D5="$TMP/data5"
+OUT5="$TMP/rootless5"
+mkdir -p "$H5"
+MAP5=(--map "/Applications=$H5/Applications" --map "/Library=$H5/Library" --map "/usr/local=$H5/.local")
+
+# --- predictive BOM (--preview): Suspicious-Package-style, builds nothing ---
+REPKGER_DATA="$D5" "$R" bom-redo "$PKG" --home "$H5" --out "$OUT5" --preview "${MAP5[@]}" > "$TMP/preview.txt" 2>&1
+check "preview: predictive BOM header"     grep -q "Predictive BOM" "$TMP/preview.txt"
+check "preview: leaf -> mapped root"       grep -q -- "->  $H5/Applications" "$TMP/preview.txt"
+check "preview: predicted entry counts"    grep -q "predicted entries" "$TMP/preview.txt"
+check "preview: script estimate"           grep -q "postinstall: 4 ref(s) -> home-mapped" "$TMP/preview.txt"
+check "preview: total line"                grep -q "Total: 5 leaf package(s), 15 predicted BOM entries" "$TMP/preview.txt"
+check "preview: builds nothing"            test ! -e "$OUT5"
+
+# --- targeted multi-level extraction: --only /Applications ---
+REPKGER_DATA="$D5" "$R" bom-redo "$PKG" --home "$H5" --out "$OUT5" --only /Applications "${MAP5[@]}" --quiet >/dev/null
+check "only: single leaf -> flat rootless .pkg" test -f "$OUT5/mini-rootless.pkg"
+X5="$TMP/x5"
+rm -rf "$X5"; mkdir -p "$X5"
+(cd "$X5" && xar -xf "$OUT5/mini-rootless.pkg" PackageInfo Bom)
+check "only: install-location is the mapped dir" \
+    grep -q "install-location=\"$H5/Applications\"" "$X5/PackageInfo"
+BOM5="$(lsbom "$X5/Bom")"
+check "only: BOM has the app subtree"      grep -q "\./MiniApp.app" <<< "$BOM5"
+check "only: BOM excludes /Library"        test -z "$(printf '%s' "$BOM5" | grep -F 'Library' || true)"
+check "only: BOM excludes /usr/local"      test -z "$(printf '%s' "$BOM5" | grep -F './usr' || true)"
+
+# --- embedded scripts adjusted to match the redone BOM ---
+(cd "$X5" && xar -xf "$OUT5/mini-rootless.pkg" Scripts)
+mkdir -p "$TMP/s5"
+(cd "$TMP/s5" && gunzip -dc "$X5/Scripts" | cpio -id >/dev/null 2>&1)
+check "scripts: postinstall embedded"      test -f "$TMP/s5/postinstall"
+check "scripts: /Applications ref home-mapped" \
+    grep -Fq "$H5/Applications/MiniApp.app/Contents/Resources" "$TMP/s5/postinstall"
+check "scripts: no raw /Applications ref"  \
+    test -z "$(grep -E '(^|[[:space:]])/Applications/MiniApp.app' "$TMP/s5/postinstall" || true)"
+check "scripts: /Library ref home-mapped"  grep -Fq "$H5/Library/MiniSupport" "$TMP/s5/postinstall"
+check "scripts: /usr/local ref home-mapped" grep -Fq "$H5/.local/bin/mini-tool" "$TMP/s5/postinstall"
+check "scripts: shebang survives"          grep -Fq '#!/bin/sh' "$TMP/s5/postinstall"
+
+# --- full build (mpkg path) also carries the adjusted scripts ---
+rm -rf "$OUT5"
+REPKGER_DATA="$D5" "$R" bom-redo "$PKG" --home "$H5" --out "$OUT5" "${MAP5[@]}" --quiet >/dev/null
+check "full redo: mpkg produced"           test -d "$OUT5/mini-rootless.mpkg"
+LP="$(ls "$OUT5/mini-rootless.mpkg"/Contents/Packages/*.pkg | head -1)"
+X5B="$TMP/x5b"
+rm -rf "$X5B"; mkdir -p "$X5B"
+(cd "$X5B" && xar -xf "$LP" Scripts)
+mkdir -p "$TMP/s5b"
+(cd "$TMP/s5b" && gunzip -dc "$X5B/Scripts" | cpio -id >/dev/null 2>&1)
+check "full redo: leaf script adjusted"    grep -Fq "$H5/Applications/MiniApp.app" "$TMP/s5b/postinstall"
+
+# --- install --only: targeted direct extraction ---
+H5B="$TMP/home5b"
+D5B="$TMP/data5b"
+mkdir -p "$H5B"
+REPKGER_DATA="$D5B" "$R" install "$PKG" --home "$H5B" --only /Applications --home-rooted --yes >/dev/null
+check "install --only: app landed"         test -x "$H5B/Applications/MiniApp.app/Contents/MacOS/miniapp"
+check "install --only: no Library extracted" test ! -e "$H5B/Library"
+check "install --only: no .local extracted" test ! -e "$H5B/.local"
+REPKGER_DATA="$D5B" "$R" uninstall "$(ls -d "$D5B"/records/* | head -1)" --yes >/dev/null 2>&1 || true
+rm -f /Users/Shared/mini-shared.txt /tmp/mini-tmp.txt
+
+echo
 echo "roundtrip: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

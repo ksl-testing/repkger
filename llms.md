@@ -40,7 +40,9 @@ NOTES.md                # dev notes: architecture, validated behavior, gotchas
 
 ### DONE + validated
 - CLI: `inspect` (+ `--json`, `--show-scripts`, `--files [N]`), `install`,
-  `uninstall`, `list`, `brew`, `gui`, `self-install`, `version`.
+  `bom-redo` (+ `--preview`/`--list-only` predictive BOM, `--only` targeted
+  extraction, embedded-script adjustment), `uninstall`, `list`, `brew`,
+  `gui`, `self-install`, `version`.
 - **Rewrite/resign scope bug FIXED.** Rewrite + resign now operate only on the
   package's own landed files (BOM-driven `INSTALLED_FILES` list); dequarantine
   covers merged dirs + mapped install-location dirs. Validated with a decoy app

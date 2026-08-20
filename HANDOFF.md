@@ -4,6 +4,82 @@ A cacheless agent can pick up from this file. Read `README.md`, `llms.md`,
 `llms/STATUS.md`, `llms/ROADMAP.md`, and `NOTES.md` for depth; this is the
 state + next steps.
 
+## Session update (2026-08-19) — v0.4.0: two-tier production build + launch bug fixes
+
+**Production architecture is live.** Two apps built and verified:
+
+| App | Path | Bundle ID | Role |
+|-----|------|-----------|------|
+| tpl-unwrapper | `~/applications/tpl-unwrapper.app` | `com.tpl-unwrapper.app` | Primary bootkit-branded product |
+| Noren Hodoki | `~/applications/noren/Noren Hodoki.app` | `com.noren-hodoki.app` | Plugin widget for tpl-bootkit |
+
+Both embed `repkger` CLI v0.4.0, ad-hoc signed, launch from Finder.
+
+**Three launch bugs fixed:**
+1. **codesign ordering** — `codesign` ran BEFORE plist edits and the
+   INSTALL_DIR copy, so the installed `.app` was unsigned (Gatekeeper
+   blocked Finder double-click). Fixed: codesign runs last, plus re-signs
+   the installed copy at its target path.
+2. **Gatekeeper cache** — ad-hoc signed apps get rejected by `spctl` and
+   macOS caches the rejection per (bundle-ID, path). Rebuilding with the
+   same bundle ID at the same path still fails until the cache is cleared.
+   Fix: `lsregister -f <app>` after install (added to make-app.sh). Also,
+   `$HOME` expansion in `open` mangles spaces — use `~/` form in scripts.
+3. **Stale copies** — old `Noren CLI.app` / `Noren Desktop.app` from
+   OpenCode's brand work cluttered `~/applications/noren/`. Cleaned.
+
+**Build commands** (env-var-driven, no script edits needed):
+```bash
+# Primary (bootkit-branded)
+APP_NAME=tpl-unwrapper DISPLAY_NAME="TPL Unwrapper" \
+  BUNDLE_ID=com.tpl-unwrapper.app \
+  INSTALL_DIR="$HOME/applications" bash scripts/make-app.sh
+
+# Plugin (noren hodoki)
+APP_NAME="Noren Hodoki" DISPLAY_NAME="Noren Hodoki" \
+  BUNDLE_ID=com.noren-hodoki.app \
+  INSTALL_DIR="$HOME/applications/noren" bash scripts/make-app.sh
+```
+
+**Real-world verification:** 561MB BrickLink Studio 2.0.pkg
+(`https://studio.download.bricklink.info/Studio2.0/Archive/2.26.7_1/Studio+2.0.pkg`).
+Inspect: 72,871 BOM entries, postinstall script parsed. Preview: 7 leaves
+mapping `/Applications/Studio 2.0/*` → `~/Applications/Studio 2.0/*`.
+Targeted `--only "/Applications/Studio 2.0/Sample"` produced an 11-file
+rootless `.pkg`. Roundtrip suite: **82/82**. Build script now runs
+`lsregister -f` after install to clear cached Gatekeeper rejections.
+
+## Previous: v0.4.0 feature work — predictive BOM + targeted extraction + script adjustment
+
+The user's ask: make the `.pkg`/`.bundle` → no-sudo extractor a working
+product — Suspicious-Package-style **predictive BOM** for the `~/`-rooted
+repack, **targeted multi-level extractions**, and pre/post-install scripts
+**adjusted to match the new BOM**. All three shipped in `bin/repkger`
+(v0.4.0, version bumped; NOT committed):
+
+- **`bom-redo --preview` / `--list-only`**: predictive BOM — expands the
+  pkg, prints every mapping-boundary leaf → mapped root, predicted entry
+  counts, a sample of the predicted BOM (path → `~/` dest), and the script
+  estimates; returns before pkgbuild/mkbom, writes nothing.
+- **`--only PREFIX`** (bom-redo AND install): targeted extraction.
+  `only_match`/`only_below` prune the payload walk at every level (descend
+  into unmatched dirs that CONTAIN a prefix; merge/emit only subtrees at/under
+  a prefix; relative prefixes normalized against the component
+  install-location). `bom-redo … --only /Applications` → single flat
+  rootless `.pkg` whose BOM is just that subtree.
+- **Script adjustment**: embedded pre/post-install scripts are rewritten so
+  their absolute refs match the new BOM (`script_rewrite_pairs` = payload
+  pairs minus `/usr` `/bin` `/sbin` + all user `--map`s, so `#!/bin/sh` and
+  `/usr/bin/env` still work). `--preview` shows the estimate including lines
+  that can't be mapped (sudo/chown-root/launchctl/installer/System).
+
+`test/roundtrip.sh` gained **phase 5 (22 checks)** → **82/82** locally
+(preview builds nothing; `--only` BOM/install-location verified via xar +
+lsbom; embedded postinstall home-mapped with shebang intact; mpkg path;
+`install --only`). Fixture postinstall now carries stale refs to exercise the
+adjustment. Docs updated: README (quick start + design), NOTES item 13,
+ROADMAP (item 7), this file. Nothing committed/pushed; no release.
+
 ## Session update (2026-08-18) — Unity Editor test COMPLETE + `bom-redo` (v0.3.0)
 
 The user-requested **Unity Editor rootless install test is DONE** — see
@@ -273,7 +349,7 @@ Manual run example:
 
 ## Pending / next steps
 
-1. ~~**Unity Editor rootless install test**~~ ✅ **DONE (2026-08-18, v0.3.0)** —
+1. ~~**Unity Editor rootless install test**~~ ✅ DONE (2026-08-18, v0.3.0) —
    full detail in the session update above + README "Validated". Both the
    original pkg and the rootless pkg are on disk if you want to re-verify;
    note the install pass takes >10 min on this machine (the 600 s CLI cap

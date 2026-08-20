@@ -1,9 +1,10 @@
-# STATUS — 2026-08-13 (v0.2.0 + GUI multi-select)
+# STATUS — 2026-08-19 (v0.4.0)
 
 ## Done & validated
 - CLI commands: `inspect` (+ `--json`, `--show-scripts`, `--files [N]`),
-  `install`, `uninstall`, `list`, `brew`, `gui`, `self-install`, `version` —
-  single file `bin/repkger` (bash 3.2-compatible).
+  `install`, `uninstall`, `list`, `brew`, `gui`, `self-install`, `version`,
+  `bom-redo` (+ `--preview`/`--list-only`, `--only`) — single file
+  `bin/repkger` (bash 3.2-compatible).
 - **Scope bug fixed**: rewrite + resign operate only on the package's own
   landed files (BOM-driven `INSTALLED_FILES`); validated with a decoy app
   pre-placed in a scratch home — untouched.
@@ -25,11 +26,13 @@
 - **CI round-trip fix (2026-08-13)**: `test/roundtrip.sh` phase 1 pins
   `--map` `/Applications` `/Library` `/usr/local` to the scratch home —
   deterministic on admin machines (GitHub runners) where keep-if-writable
-  would keep the fixture in the real `/Applications`. 28/28 locally.
+  would keep the fixture in the real `/Applications`. 82/82 locally.
 - **Synthetic fixture** (`test/make-fixture.sh`, 3.7 KB pkg): full
   install → uninstall round-trip (25 files recorded incl. `_CodeSignature`,
   all reversed; `/Users/Shared` + `/tmp` kept in place and cleaned; a
-  top-level symlink is preserved through merge + uninstall).
+  top-level symlink is preserved through merge + uninstall; postinstall
+  carries stale `/Applications`/`/Library`/`/usr/local` refs for phase 5
+  script-adjustment testing).
 - pkg sha256 GameMaker `8cbd33a9…cc7f` (matches upstream homebrew cask) was
   verified at v0.1.0; fixture re-testing covers the loop since.
 
@@ -72,7 +75,18 @@
   `--rpkg` brew force flag + `brew()` shim (no silent installer); `--rpkg`
   handles dmg/zip casks with an inner pkg (mount/unzip → rootless install →
   cleanup); GUI `choose from list` chooser (fixed 4-button -50 bug) + cask
-  install mode + headless `--cask`. Roundtrip **58/58**.
+  install mode + headless `--cask`.
+- **New in v0.4.0**: Predictive BOM (`--preview`/`--list-only` on
+  `bom-redo`); targeted multi-level extraction (`--only PREFIX` on `bom-redo`
+  + `install`); embedded pre/post-install script adjustment to match the
+  redone BOM (`script_rewrite_pairs` = payload pairs minus `/usr` `/bin`
+  `/sbin` + user `--map`s); two-tier production build (`tpl-unwrapper`
+  primary + `Noren Hodoki` plugin, env-var-driven `make-app.sh`);
+  Gatekeeper cache fix (`lsregister -f` after install). Real-world verified:
+  BrickLink Studio 2.0.pkg (561 MB, 72K BOM entries), Unity 6000.3.22f1
+  (5 GB, 55K entries). Roundtrip **82/82**.
+- **Production apps** at `~/applications/`: `tpl-unwrapper.app` (primary)
+  and `noren/Noren Hodoki.app` (plugin), both v0.4.0, signed, Finder-launched.
 - Repkger.app has no custom icon / notarization; progress UI is
   notifications-only (no progress bar yet).
 - Tap casks: the `famistudio` cask is DONE and live at **4.5.3** (rootless
@@ -81,23 +95,24 @@
   settings ini byte-identical after `brew upgrade --cask famistudio`). Still open:
   `Casks/repkger.rb` (GUI) + rootless `Casks/gamemaker.rb`.
 
-## Release pipeline (new in this session, validated locally)
+## Release pipeline
 - `.github/workflows/release.yml`: push to `main` (paths: bin/gui/scripts/
-  tap/test/workflow) or `workflow_dispatch` → test (fixture round-trip 28
+  tap/test/workflow) or `workflow_dispatch` → test (fixture round-trip 82
   checks + GUI smoke) → build (`make-app.sh`, CLI zip, app zip, SHA256SUMS)
   → publish/refresh release `v<REPKGER_VERSION>` with assets →
   `scripts/update-tap.sh` updates `ksl-testing/homebrew-tap`. Manual
   re-trigger: `gh workflow run build-release.yml` (works from mobile).
 - `scripts/update-tap.sh` renders `tap/repkgr.rb` (+ `repkger.rb` alias) with
   the release URL + sha256, clones or creates the tap repo, commits, pushes.
-- Validated: workflow YAML parses; `bash -n` all scripts; `test/roundtrip.sh`
-  28/28; generated formulas pass `brew style` (0 offenses), `brew install`
-  and `brew test` via a throwaway local tap (then untapped, no residue).
-- To activate (CI): commit + push, add `TAP_TOKEN` secret, then
-  `brew install ksl-testing/tap/repkgr`. ⚠️ As of 2026-08-15 CI is blocked
-  by GitHub account billing (runs don't start) — v0.2.0 was published
-  manually via `gh release create` instead; see the Outstanding note above,
-  `HANDOFF.md`, and the `scripts/release-gh.sh` placeholder.
+- **Env-var build** (`scripts/make-app.sh`): APP_NAME, DISPLAY_NAME,
+  BUNDLE_ID, INSTALL_DIR — no script edits needed. Primary build:
+  `APP_NAME=tpl-unwrapper` at `~/applications/`. Plugin build:
+  `APP_NAME="Noren Hodoki"` at `~/applications/noren/`. After install,
+  `lsregister -f` clears cached Gatekeeper rejections.
+- ⚠️ CI blocked by GitHub account billing (runs don't start) — v0.2.0 and
+  v0.3.0 published manually via `gh release create`. v0.4.0 pending commit.
+  `scripts/release-gh.sh` is a non-working placeholder for future automation.
+  Tap formula still needs a `TAP_TOKEN` PAT.
 
 ## Housekeeping notes
 - `test/make-fixture.sh` builds the fast fixture (`/tmp/repkger-fixture/mini.pkg`);
@@ -105,3 +120,7 @@
 - `~/Downloads/repkger-test/` (GameMaker fixture) was deleted to save space;
   re-downloadable.
 - `~/.repkger/records/` holds the real-install GameMaker record from v0.1.0.
+- `gui/NorenHodoki.icns` (kuchinashi gradient icon) — sourced from
+  tpl-bootkit branding. `make-app.sh` picks it up automatically.
+- Real-world test pkgs on disk: BrickLink Studio 2.0.pkg (561 MB) in
+  `~/Downloads/`, Unity 6000.3.22f1-arm64.pkg (5 GB) in `~/Downloads/`.

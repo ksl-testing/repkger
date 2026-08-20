@@ -92,7 +92,11 @@ echo "preinstall would run (recorded, not executed)"
 SH
 cat > "$scripts/postinstall" <<'SH'
 #!/bin/sh
-echo "postinstall would run (recorded, not executed)"
+# postinstall refs that bom-redo must home-map to match the redone BOM
+mkdir -p /Applications/MiniApp.app/Contents/Resources
+chmod 755 /Applications/MiniApp.app/Contents/MacOS/miniapp
+echo "support at /Library/MiniSupport" > /Library/MiniSupport/README.txt
+echo "tool at /usr/local/bin/mini-tool"
 SH
 chmod +x "$scripts"/*
 

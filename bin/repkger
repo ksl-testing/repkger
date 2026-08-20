@@ -19,7 +19,16 @@
 #       resulting rootless .pkg/.mpkg extracts DIRECTLY to the mapped
 #       locations (no remapping needed) — e.g. /Applications/Unity/Hub/...
 #       -> ~/Applications/Unity/Hub/..., the way Unity Hub would install to
-#       ~/Applications. Default --out: $REPKGER_DATA/rootless.
+#       ~/Applications. Pre/post-install scripts are ADJUSTED (path refs
+#       home-mapped to match the new BOM) before being embedded.
+#       Default --out: $REPKGER_DATA/rootless.
+#       --preview|--list-only  predictive BOM: Suspicious-Package-style preview
+#                              of the redone package (every leaf -> mapped root,
+#                              predicted BOM entries, script estimates) —
+#                              expands but builds/writes nothing.
+#       --only PREFIX          targeted multi-level extraction: only payload
+#                              paths at/under PREFIX (absolute, or relative to
+#                              the component install-location); repeatable.
 #   repkger uninstall <pkg-path|name|record> [--yes] [--purge]
 #       Reverse a repkger install using its recorded file manifest.
 #   repkger list [--json]
@@ -52,8 +61,12 @@
 #                      the rest to ~/
 #   --map SRC=DEST     add/override a mapping (repeatable); SRC and DEST are
 #                      absolute paths, e.g. --map "/usr/local=$HOME/opt"
+#   --only PREFIX      targeted extraction: only payload paths at/under PREFIX
+#                      (absolute, or relative to the component install-location)
 #   (bom-redo accepts the same --home/--map/--home-rooted/--keep-writable
-#    options as install, plus --out for the output directory)
+#    options as install, plus --out for the output directory, --only for
+#    targeted multi-level extraction, and --preview/--list-only for the
+#    predictive BOM)
 #   --list-only        show what would be installed, change nothing
 #   --no-sign          skip quarantine stripping and code-sign checks
 #                      (stripping removes com.apple.quarantine from each target
@@ -70,7 +83,7 @@
 
 set -euo pipefail
 
-REPKGER_VERSION="0.3.0"
+REPKGER_VERSION="0.4.0"
 REPKGER_DATA="${REPKGER_DATA:-$HOME/.repkger}"
 RECORDS_DIR="$REPKGER_DATA/records"
 CACHE_DIR="$REPKGER_DATA/cache"
@@ -144,11 +157,13 @@ KEEP_WRITABLE=1
 DO_SIGN=1
 RUN_SCRIPTS=0
 LIST_ONLY=0
+PREVIEW=0                      # bom-redo --preview/--list-only: predictive BOM
 CLEAN=0
 QUIET=0
 VERBOSE=1
 DRY=0
 declare -a USER_MAPS=()
+declare -a ONLY_MATCHES=()       # --only payload prefixes (targeted extraction)
 declare -a MERGED_DIRS=()         # exact dirs merged from payloads (for quarantine strip)
 declare -a MAPPED_LOCS=()         # mapped install-location dirs per component (deduped)
 CASK_STAGE=""                    # brew wrapper: extract dir for dmg/zip containers
@@ -244,6 +259,41 @@ map_prefixes() {
     for entry in ${USER_MAPS[@]+"${USER_MAPS[@]}"}; do
         echo "${entry%%=*}"
     done
+}
+
+# targeted extraction (--only): payload-walk prefix filters (virtual abs paths)
+only_match() {  # $1 = virtual abs path; 0 = path is at/under a requested prefix
+    [ "${#ONLY_MATCHES[@]}" -eq 0 ] && return 0
+    local op
+    for op in ${ONLY_MATCHES[@]+"${ONLY_MATCHES[@]}"}; do
+        case "$1" in
+            "$op"|"$op/"*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+only_below() {  # $1 = virtual abs path; 0 = a requested prefix lies under it
+    local op
+    for op in ${ONLY_MATCHES[@]+"${ONLY_MATCHES[@]}"}; do
+        case "$op" in
+            "$1/"*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+set_only_matches() {  # $1 = component install-location; normalize relative --only prefixes
+    [ "${#ONLY_MATCHES[@]}" -gt 0 ] || return 0
+    local loc="$1" op
+    local -a n=()
+    for op in ${ONLY_MATCHES[@]+"${ONLY_MATCHES[@]}"}; do
+        case "$op" in
+            /*) n+=("$op") ;;
+            *)  n+=("${loc%/}/$op") ;;
+        esac
+    done
+    ONLY_MATCHES=("${n[@]}")
 }
 
 # ---------------------------------------------------------------------------
@@ -403,9 +453,12 @@ merge_tree() {
                 "$vc/"*) has_boundary=1; break ;;
             esac
         done < <(map_prefixes)
-        if [ "$has_boundary" -eq 1 ]; then
+        # targeted extraction (--only): descend when a requested prefix lies
+        # deeper, otherwise merge only subtrees that are at/under a prefix
+        if [ "$has_boundary" -eq 1 ] || { [ "${#ONLY_MATCHES[@]}" -gt 0 ] && only_below "$vc"; }; then
             merge_tree "$c" "$vc"
         else
+            [ "${#ONLY_MATCHES[@]}" -gt 0 ] && ! only_match "$vc" && continue
             if [ "$DRY" -eq 1 ]; then
                 say "  would merge: $vc -> $mc"
                 continue
@@ -856,6 +909,7 @@ cmd_install() {
             --no-keep-writable) KEEP_WRITABLE=0; shift ;;
             --keep-writable) KEEP_WRITABLE=1; shift ;;
             --map)         [ $# -ge 2 ] || die "--map needs SRC=DEST"; USER_MAPS+=("$2"); shift 2 ;;
+            --only)        [ $# -ge 2 ] || die "--only needs a prefix"; ONLY_MATCHES+=("$2"); shift 2 ;;
             --list-only)   LIST_ONLY=1; DRY=1; shift ;;
             --no-sign)     DO_SIGN=0; shift ;;
             --run-scripts) RUN_SCRIPTS=1; shift ;;
@@ -917,6 +971,7 @@ cmd_install() {
     local loc payload mapped_loc
     for c in ${comps[@]+"${comps[@]}"}; do
         loc=$(comp_install_loc "$c"); [ -z "$loc" ] && loc="/"
+        set_only_matches "$loc"
         payload=$(payload_root "$c")
         [ -n "$payload" ] || { warn "SKIP $(basename "$c"): no payload"; continue; }
         say "== $(comp_display_name "$c" "$prod_root" "$pkg")  install-location: $loc =="
@@ -1060,13 +1115,158 @@ bom_redo_leaves() {
                 "$vc/"*) has_boundary=1; break ;;
             esac
         done < <(map_prefixes)
-        if [ "$has_boundary" -eq 1 ]; then
+        # targeted extraction (--only): descend when a requested prefix lies
+        # deeper, otherwise emit only subtrees at/under a prefix
+        if [ "$has_boundary" -eq 1 ] || { [ "${#ONLY_MATCHES[@]}" -gt 0 ] && only_below "$vc"; }; then
             bom_redo_leaves "$c" "$vc"
         else
-            printf '%s\t%s\n' "$c" "$(map_path "$vc")"
+            [ "${#ONLY_MATCHES[@]}" -gt 0 ] && ! only_match "$vc" && continue
+            printf '%s\t%s\t%s\n' "$c" "$(map_path "$vc")" "$vc"
         fi
     done
     shopt -u dotglob nullglob
+}
+
+# ---------------------------------------------------------------------------
+# script adjustment for redone packages — pre/post-install "equivalents"
+# ---------------------------------------------------------------------------
+# Pairs used to adjust install scripts embedded in a redone package. Same
+# home-mapping as the payload rewrite, EXCEPT the pure system-tool dirs
+# (/usr, /bin, /sbin): a postinstall still needs `#!/bin/sh` and
+# /usr/bin/env to resolve to the REAL system tools — those exist regardless
+# of where the payload lands, and their home-mapped equivalents don't. User
+# --map pairs always win and are always applied.
+script_rewrite_pairs() {
+    local p root
+    for p in /Applications /Library /usr/local /etc /private /var /opt /Users/Shared /tmp; do
+        root=$(map_path "$p" 2>/dev/null)
+        [ -n "$root" ] || continue
+        [ "$root" = "$p" ] && continue
+        printf '%s\034%s\n' "$p" "$root"
+    done
+    local entry src dst
+    for entry in ${USER_MAPS[@]+"${USER_MAPS[@]}"}; do
+        src="${entry%%=*}"; dst="${entry#*=}"
+        [ "$src" = "$dst" ] && continue
+        printf '%s\034%s\n' "$src" "$dst"
+    done
+}
+
+# redo_scripts <comp dir> <stage dir> — copy the component's install scripts
+# into <stage> with every path reference home-mapped to match the redone BOM
+# (binary scripts are copied untouched; the shebang survives because the
+# system-tool dirs aren't in script_rewrite_pairs). Echoes
+# "name<TAB>changed-line-count" per adjusted script.
+redo_scripts() {
+    local c="$1" stage="$2"
+    [ -d "$c/Scripts" ] || return 0
+    local pairs_file f name changed bin
+    pairs_file=$(mktemp)
+    script_rewrite_pairs > "$pairs_file"
+    rm -rf "$stage"; mkdir -p "$stage"
+    cp -p "$c"/Scripts/* "$stage"/ 2>/dev/null || true
+    [ -s "$pairs_file" ] || { rm -f "$pairs_file"; return 0; }
+    local origdir; origdir="$(dirname "$stage")/orig-scripts-$(basename "$stage")"
+    rm -rf "$origdir"; mkdir -p "$origdir"
+    for f in "$stage"/*; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f")
+        case "$(file -b "$f" 2>/dev/null)" in *binary*) continue ;; esac
+        cp "$c/Scripts/$name" "$origdir/$name"
+        rewrite_one "$f" "$pairs_file"
+        changed=$(diff "$origdir/$name" "$f" 2>/dev/null | grep -c '^>' || true)
+        [ "$changed" -gt 0 ] && printf '%s\t%s\n' "$name" "$changed"
+    done
+    rm -f "$pairs_file"; rm -rf "$origdir"
+    return 0
+}
+
+# script_estimate <comp dir> — Suspicious-Package-style estimate of what the
+# embedded install scripts become: how many refs get home-mapped, and which
+# lines still need privileges (those CANNOT be mapped). Prints only.
+script_estimate() {
+    local c="$1"
+    [ -d "$c/Scripts" ] || return 0
+    local pairs_file f name old changed unmappable line pats=""
+    pairs_file=$(mktemp)
+    script_rewrite_pairs > "$pairs_file"
+    if [ ! -s "$pairs_file" ]; then
+        rm -f "$pairs_file"
+        echo "  scripts: no path adjustments needed"
+        return 0
+    fi
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        old="${line%%$'\034'*}"
+        pats="${pats:+$pats|}$(printf '%s' "$old" | sed 's/[][\/.^$*+?(){}|]/\\&/g')"
+    done < "$pairs_file"
+    rm -f "$pairs_file"
+    for f in "$c"/Scripts/*; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f")
+        changed=$(grep -Ec "$pats" "$f" 2>/dev/null || true)
+        unmappable=$(grep -cE -e 'sudo[[:space:]]' -e 'chown[[:space:]]+[^[:space:]]*root' \
+            -e 'launchctl[[:space:]]' -e '/System/' -e '[[:space:]]installer[[:space:]]' "$f" 2>/dev/null || true)
+        printf '    %s: %s ref(s) -> home-mapped' "$name" "$changed"
+        if [ "$unmappable" -gt 0 ]; then
+            printf '; %s line(s) need privileges and CANNOT be mapped (sudo/chown-root/launchctl/installer/System)\n' "$unmappable"
+        else
+            printf '\n'
+        fi
+    done
+    return 0
+}
+
+# predictive BOM — Suspicious-Package-style preview of the redone package:
+# every mapping-boundary leaf -> mapped root, a sample of the predicted BOM
+# entries, and the script estimates. Builds nothing, writes nothing.
+cmd_bom_redo_preview() {  # $1 name; $2 ver; $3 prod_root; $4 pkg; $5... comp dirs
+    local name="$1" ver="$2" prod_root="$3" pkg="$4"; shift 4
+    local -a comps=()
+    local c
+    for c in "$@"; do comps+=("$c"); done
+    echo "== Predictive BOM: $(basename "$pkg") (v${ver:-?}) — nothing written, no pkgbuild =="
+    local comp_i=0 loc payload leaf leafsrc mapped vc rest idx cnt f rel shown
+    local total_leaves=0 total_entries=0
+    for c in ${comps[@]+"${comps[@]}"}; do
+        comp_i=$((comp_i + 1))
+        loc=$(comp_install_loc "$c"); [ -z "$loc" ] && loc="/"
+        payload=$(payload_root "$c")
+        [ -n "$payload" ] || { warn "SKIP $(basename "$c"): no payload"; continue; }
+        if [ ! -d "$payload" ]; then
+            warn "SKIP $(basename "$c"): payload is compressed, not a dir (re-run with --clean)"
+            continue
+        fi
+        set_only_matches "$loc"
+        echo ""
+        echo "== Component $comp_i: $(comp_display_name "$c" "$prod_root" "$pkg")  (install-location: $loc) =="
+        idx=0
+        while IFS= read -r leaf; do
+            [ -z "$leaf" ] && continue
+            leafsrc="${leaf%%$'\t'*}"; rest="${leaf#*$'\t'}"
+            mapped="${rest%%$'\t'*}"; vc="${rest#*$'\t'}"
+            [ -n "$mapped" ] || continue
+            [ "$mapped" = "/" ] && continue
+            idx=$((idx + 1)); total_leaves=$((total_leaves + 1))
+            cnt=$(find "$leafsrc" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')
+            total_entries=$((total_entries + cnt))
+            echo "  leaf $idx: $vc  ->  $mapped   ($cnt predicted entries)"
+            shown=0
+            while IFS= read -r -d '' f; do
+                rel="${f#"$leafsrc"/}"
+                printf '      ./%s  ->  %s/%s\n' "$rel" "${mapped%/}" "$rel"
+                shown=$((shown + 1))
+                [ "$shown" -ge 5 ] && { echo "      ..."; break; }
+            done < <(find "$leafsrc" -mindepth 1 -print0 2>/dev/null)
+        done < <(bom_redo_leaves "$payload" "$loc")
+        script_estimate "$c"
+    done
+    echo ""
+    echo "Total: $total_leaves leaf package(s), $total_entries predicted BOM entries."
+    if [ "${#ONLY_MATCHES[@]}" -gt 0 ]; then
+        echo "Targeted: only paths at/under: ${ONLY_MATCHES[*]}"
+    fi
+    return 0
 }
 
 cmd_bom_redo() {
@@ -1076,6 +1276,9 @@ cmd_bom_redo() {
             --home)        [ $# -ge 2 ] || die "--home needs a value"; HOME_ROOT="$2"; shift 2 ;;
             --out)         [ $# -ge 2 ] || die "--out needs a value"; out="$2"; shift 2 ;;
             --map)         [ $# -ge 2 ] || die "--map needs SRC=DEST"; USER_MAPS+=("$2"); shift 2 ;;
+            --only)        [ $# -ge 2 ] || die "--only needs a prefix"; ONLY_MATCHES+=("$2"); shift 2 ;;
+            --preview)     PREVIEW=1; shift ;;
+            --list-only)   PREVIEW=1; shift ;;
             --home-rooted) KEEP_WRITABLE=0; shift ;;
             --keep-writable) KEEP_WRITABLE=1; shift ;;
             --clean)       CLEAN=1; shift ;;
@@ -1085,11 +1288,9 @@ cmd_bom_redo() {
             *)             [ -z "$pkg" ] && pkg="$1" || die "unexpected argument: $1"; shift ;;
         esac
     done
-    [ -n "$pkg" ] || die "usage: repkger bom-redo <file.pkg> [--home DIR] [--out DIR] [--map SRC=DEST]"
+    [ -n "$pkg" ] || die "usage: repkger bom-redo <file.pkg> [--home DIR] [--out DIR] [--map SRC=DEST] [--only PREFIX] [--preview]"
     [ -e "$pkg" ] || die "not found: $pkg"
     HOME_ROOT="${HOME_ROOT%/}"; [ -n "$HOME_ROOT" ] || HOME_ROOT="/"
-    require_cmds pkgbuild
-    command -v mkbom >/dev/null 2>&1 || die "required tool not found: mkbom"
 
     local sha name ver
     sha=$(sha256_of "$pkg")
@@ -1115,15 +1316,24 @@ cmd_bom_redo() {
     case "$v" in ""|0|"<none>") v=$(dist_version "$prod_root/Distribution") ;; esac
     [ -n "$v" ] && ver="$v"
 
+    if [ "$PREVIEW" -eq 1 ]; then
+        cmd_bom_redo_preview "$name" "$ver" "$prod_root" "$pkg" ${comps[@]+"${comps[@]}"}
+        return 0
+    fi
+
+    require_cmds pkgbuild
+    command -v mkbom >/dev/null 2>&1 || die "required tool not found: mkbom"
+
     mkdir -p "$out"
     say "== Redoing BOM of $(basename "$pkg") to no-sudo locations (root: $HOME_ROOT) =="
 
     local -a built=()
     local comp_i=0 idx=0 leaf leafsrc mapped
-    local cid cver loc payload pkgout outname slug
+    local cid cver loc payload pkgout outname slug scr_stage scr_out sline vc rest
     for c in ${comps[@]+"${comps[@]}"}; do
         comp_i=$((comp_i + 1))
         loc=$(comp_install_loc "$c"); [ -z "$loc" ] && loc="/"
+        set_only_matches "$loc"
         payload=$(payload_root "$c")
         [ -n "$payload" ] || { warn "SKIP $(basename "$c"): no payload"; continue; }
         if [ ! -d "$payload" ]; then
@@ -1134,22 +1344,38 @@ cmd_bom_redo() {
         [ -z "$cver" ] && cver="1.0"
         say "== $(comp_display_name "$c" "$prod_root" "$pkg")  install-location: $loc =="
 
+        # stage adjusted install scripts once per component: copies with every
+        # path reference home-mapped to match the redone BOM (estimates of the
+        # original pre/post-install logic; system-tool dirs left untouched)
+        scr_stage=""
+        if [ -d "$c/Scripts" ]; then
+            scr_stage="$EXPAND_TMP/scripts-$comp_i"
+            scr_out=$(redo_scripts "$c" "$scr_stage")
+            if [ -n "$scr_out" ]; then
+                while IFS= read -r sline; do
+                    [ -z "$sline" ] && continue
+                    say "  adjusted script $(printf '%s' "$sline" | cut -f1): $(printf '%s' "$sline" | cut -f2) path ref(s) home-mapped to match the new BOM"
+                done <<< "$scr_out"
+            fi
+        fi
+
         idx=0
         while IFS= read -r leaf; do
             [ -z "$leaf" ] && continue
             idx=$((idx + 1))
-            leafsrc="${leaf%%$'\t'*}"; mapped="${leaf#*$'\t'}"
+            leafsrc="${leaf%%$'\t'*}"; rest="${leaf#*$'\t'}"
+            mapped="${rest%%$'\t'*}"; vc="${rest#*$'\t'}"
             [ -n "$mapped" ] || continue
-            [ "$mapped" = "/" ] && { warn "SKIP $(basename "$leafsrc"): maps to / (cannot root a repack at /)"; continue; }
+            [ "$mapped" = "/" ] && { warn "SKIP $vc: maps to / (cannot root a repack at /)"; continue; }
             slug=$(printf '%s' "$mapped" | tr '/' '_' | tr -c 'A-Za-z0-9_.-' '_')
             pkgout="$out/${name}-${comp_i}-${idx}-${slug}.pkg"
             rm -f "$pkgout"
-            say "  leaf: $(basename "$leafsrc")  ->  $mapped"
+            say "  leaf: $vc  ->  $mapped"
             local -a pb=()
             pb+=(--root "$leafsrc" --install-location "$mapped")
             pb+=(--identifier "$cid")   # same id: rootless leaves of one component merge records
             pb+=(--version "$cver" --ownership preserve)
-            [ -d "$c/Scripts" ] && pb+=(--scripts "$c/Scripts")
+            [ -n "$scr_stage" ] && pb+=(--scripts "$scr_stage")
             if ! pkgbuild "${pb[@]}" "$pkgout" >/dev/null 2>&1; then
                 # scripts may trip pkgbuild (e.g. arch-suffixed names) — retry without
                 if [ -d "$c/Scripts" ] && pkgbuild --root "$leafsrc" --install-location "$mapped" \
