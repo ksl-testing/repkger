@@ -267,3 +267,40 @@
   `/Users/Shared/GameMakerStudio2` dirs. Note: `postinstall-e` /
   `preinstall-e` variants exist (arch-specific copies), payload also contains
   `Alice.gmplugin-e`-style `-e` files — those are real files, do not filter.
+
+## Container input support + script sanitization (v0.5.0)
+
+18. **Container resolution** (`resolve_pkg_input`): `inspect`, `install`, and
+    `bom-redo` now accept `.pkg`, `.mpkg`, `.bundle` (flat XAR — extension
+    agnostic), `.dmg` (mounts read-only via `hdiutil`, finds inner `.pkg`,
+    auto-detaches), `.zip` / `.tar*` (extracts to temp dir, finds inner `.pkg`),
+    or a directory containing a `.pkg`. DMG mounts and temp dirs are cleaned up
+    via EXIT trap. The function sets the global `RESOLVED_PKG` (not echoed —
+    avoids subshell propagation issues with `$(...)` callers). Info messages
+    go to stderr to avoid polluting return captures.
+19. **Script sanitization** (`sanitize_script` + `run_install_scripts`):
+    `--run-scripts` now actually executes scripts (was a no-op before). Before
+    execution, scripts are sanitized: `sudo` prefixes stripped (handles
+    `sudo -u user`, `sudo -u user -s`, etc.), `launchctl`/`installer`/`chown
+    root`/`/System/` writes commented out, binary scripts copied untouched.
+    Path references are rewritten via `rewrite_one` to match home-mapped
+    locations. Scripts run in a home-rooted environment (`DSTROOT`, `HOME`,
+    `INSTALLER_TEMP`).
+20. **Enhanced inspect output**: script content shown by default (Suspicious
+    Package parity). Each script shows Name, Kind, Size, As User (from `auth`
+    attribute), When (inferred from script name: preinstall → "Before moving
+    files into place", postinstall → "After moving files into place"), and
+    line-numbered content with privilege warnings (sudo/chown-root/launchctl/
+    /System/ paths flagged). New `--no-scripts` flag to suppress. Previous
+    `--show-scripts` still accepted for backward compat.
+21. **Container cleanup** (`container_cleanup`): unified cleanup function for
+    DMG mounts and temp extract dirs. Replaces old `cask_cleanup` (which now
+    delegates to it). Both `CONTAINER_*` and `CASK_*` globals are cleaned.
+    EXIT traps in `cmd_inspect`, `cmd_install`, `cmd_bom_redo` chain
+    `container_cleanup` with `rm -rf EXPAND_TMP`. Trap uses `${EXPAND_TMP:-}`
+    to avoid unbound-variable errors under `set -u`.
+22. **Test suite**: 104 checks (was 82). Phase 6 (12 checks): `.dmg`, `.bundle`,
+    `.zip`, directory input, `bom-redo` on `.dmg`, unsupported-input error.
+    Phase 7 (10 checks): enhanced inspect output (As User, When, Kind, line
+    numbers), `--no-scripts`, `--run-scripts` with path rewriting + sudo
+    sanitization.

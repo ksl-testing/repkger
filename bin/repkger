@@ -8,13 +8,18 @@
 #
 # Commands:
 #   repkger inspect <pkg> [--json] [--show-scripts] [--files [N]]
-#       Read a .pkg like Suspicious Package: components, versions, install
-#       locations, BOM file lists, payload sizes, pre/post-install scripts.
+#       Read a .pkg (or .dmg/.zip/.bundle containing a .pkg) like Suspicious
+#       Package: components, versions, install locations, BOM file lists,
+#       payload sizes, pre/post-install scripts.
 #       --files lists up to N BOM entries with their home-mapped destinations.
 #   repkger install <pkg> [options]
-#       Home-rooted install (see options below).
+#       Home-rooted install (see options below). Accepts .pkg, .mpkg, .bundle,
+#       .dmg (mounts and finds inner .pkg), .zip (extracts inner .pkg), or a
+#       directory containing a .pkg.
 #   repkger bom-redo <pkg> [--home DIR] [--out DIR] [--map SRC=DEST ...]
-#       Redo the package BOM to no-sudo locations and repack: rebuilds the
+#       Redo the package BOM to no-sudo locations and repack. Accepts .pkg,
+#       .mpkg, .bundle, .dmg, .zip, or a directory containing a .pkg.
+#       Rebuilds the
 #       payload rooted at the mapped ~/ destinations (pkgbuild), so the
 #       resulting rootless .pkg/.mpkg extracts DIRECTLY to the mapped
 #       locations (no remapping needed) — e.g. /Applications/Unity/Hub/...
@@ -83,7 +88,7 @@
 
 set -euo pipefail
 
-REPKGER_VERSION="0.4.0"
+REPKGER_VERSION="0.5.0"
 REPKGER_DATA="${REPKGER_DATA:-$HOME/.repkger}"
 RECORDS_DIR="$REPKGER_DATA/records"
 CACHE_DIR="$REPKGER_DATA/cache"
@@ -168,6 +173,8 @@ declare -a MERGED_DIRS=()         # exact dirs merged from payloads (for quarant
 declare -a MAPPED_LOCS=()         # mapped install-location dirs per component (deduped)
 CASK_STAGE=""                    # brew wrapper: extract dir for dmg/zip containers
 CASK_MNT=""                      # brew wrapper: mounted dmg volume
+CONTAINER_STAGE=""               # resolve_pkg_input: temp dir for dmg/zip extraction
+CONTAINER_MNT=""                 # resolve_pkg_input: mounted dmg volume
 declare -a INSTALLED_FILES=()     # "dst<TAB>typ<TAB>mode<TAB>uidgid<TAB>size" — the package's OWN files
 
 HOME_ROOT="${HOME_ROOT%/}"
@@ -294,6 +301,131 @@ set_only_matches() {  # $1 = component install-location; normalize relative --on
         esac
     done
     ONLY_MATCHES=("${n[@]}")
+}
+
+# ---------------------------------------------------------------------------
+# container cleanup (dmg mount / zip extract)
+# ---------------------------------------------------------------------------
+container_cleanup() {
+    if [ -n "$CONTAINER_MNT" ] && [ -d "$CONTAINER_MNT" ]; then
+        hdiutil detach "$CONTAINER_MNT" >/dev/null 2>&1 \
+            || hdiutil detach -force "$CONTAINER_MNT" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$CONTAINER_STAGE" ] && [ -d "$CONTAINER_STAGE" ]; then
+        rm -rf "$CONTAINER_STAGE"
+    fi
+    CONTAINER_MNT=""; CONTAINER_STAGE=""
+    # also clean up legacy cask vars
+    if [ -n "$CASK_MNT" ] && [ -d "$CASK_MNT" ]; then
+        hdiutil detach "$CASK_MNT" >/dev/null 2>&1 \
+            || hdiutil detach -force "$CASK_MNT" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$CASK_STAGE" ] && [ -d "$CASK_STAGE" ]; then
+        rm -rf "$CASK_STAGE"
+    fi
+    CASK_MNT=""; CASK_STAGE=""
+}
+
+# ---------------------------------------------------------------------------
+# resolve_pkg_input — detect .dmg/.zip/.bundle/.pkg/.mpkg/directory input
+# and resolve to the actual .pkg file path(s). Sets the global RESOLVED_PKG
+# (NOT echoed — because callers invoke this in a context where globals must
+# propagate). Also sets CONTAINER_STAGE / CONTAINER_MNT for cleanup.
+# Callers should `trap container_cleanup EXIT` after calling this.
+# For directories, finds the first .pkg inside.
+# ---------------------------------------------------------------------------
+RESOLVED_PKG=""
+resolve_pkg_input() {
+    local input="$1"
+    [ -e "$input" ] || die "not found: $input"
+    RESOLVED_PKG=""
+
+    # already a .pkg / .mpkg / .bundle — works as-is (flat XAR)
+    case "$input" in
+        *.pkg|*.mpkg|*.bundle)
+            RESOLVED_PKG="$input"
+            return 0
+            ;;
+    esac
+
+    # directory — scan for .pkg inside
+    if [ -d "$input" ]; then
+        local found
+        found=$(find "$input" -maxdepth 4 \( -name '*.pkg' -o -name '*.mpkg' \) 2>/dev/null | head -1)
+        if [ -n "$found" ]; then
+            RESOLVED_PKG="$found"
+        else
+            die "no .pkg/.mpkg found inside directory: $input"
+        fi
+        return 0
+    fi
+
+    # .dmg — mount, find inner .pkg, cleanup later
+    case "$input" in
+        *.dmg)
+            require_cmds hdiutil
+            CONTAINER_STAGE=$(mktemp -d "${TMPDIR:-/tmp}/repkger-container.XXXXXX")
+            CONTAINER_MNT="$CONTAINER_STAGE/mnt"
+            mkdir -p "$CONTAINER_MNT"
+            hdiutil attach "$input" -nobrowse -readonly -mountpoint "$CONTAINER_MNT" >/dev/null 2>&1 \
+                || die "could not mount $input (hdiutil attach failed)"
+            printf '%s\n' "  mounted: $CONTAINER_MNT" >&2
+            local found
+            found=$(find "$CONTAINER_MNT" -maxdepth 4 \( -name '*.pkg' -o -name '*.mpkg' \) 2>/dev/null | head -1)
+            if [ -z "$found" ]; then
+                container_cleanup
+                die "no .pkg/.mpkg found inside $input"
+            fi
+            printf '%s\n' "  inner pkg: $found" >&2
+            RESOLVED_PKG="$found"
+            return 0
+            ;;
+    esac
+
+    # .zip — extract, find inner .pkg, cleanup later
+    case "$input" in
+        *.zip)
+            CONTAINER_STAGE=$(mktemp -d "${TMPDIR:-/tmp}/repkger-container.XXXXXX")
+            if command -v unzip >/dev/null 2>&1; then
+                unzip -o -q "$input" -d "$CONTAINER_STAGE" >/dev/null 2>&1 \
+                    || die "could not unzip $input"
+            else
+                ditto -x -k "$input" "$CONTAINER_STAGE" >/dev/null 2>&1 \
+                    || die "could not unzip $input (ditto)"
+            fi
+            local found
+            found=$(find "$CONTAINER_STAGE" -maxdepth 4 \( -name '*.pkg' -o -name '*.mpkg' \) 2>/dev/null | head -1)
+            if [ -z "$found" ]; then
+                container_cleanup
+                die "no .pkg/.mpkg found inside $input"
+            fi
+            printf '%s\n' "  inner pkg: $found" >&2
+            RESOLVED_PKG="$found"
+            return 0
+            ;;
+    esac
+
+    # .tar / .tar.gz / .tgz / .tar.bz2 — extract, find inner .pkg
+    case "$input" in
+        *.tar|*.tar.gz|*.tgz|*.tar.bz2|*.tar.xz)
+            CONTAINER_STAGE=$(mktemp -d "${TMPDIR:-/tmp}/repkger-container.XXXXXX")
+            tar -xf "$input" -C "$CONTAINER_STAGE" 2>/dev/null \
+                || die "could not extract $input"
+            local found
+            found=$(find "$CONTAINER_STAGE" -maxdepth 4 \( -name '*.pkg' -o -name '*.mpkg' \) 2>/dev/null | head -1)
+            if [ -z "$found" ]; then
+                container_cleanup
+                die "no .pkg/.mpkg found inside $input"
+            fi
+            printf '%s\n' "  inner pkg: $found" >&2
+            RESOLVED_PKG="$found"
+            return 0
+            ;;
+    esac
+
+    # unknown — try treating as a raw package (pkgutil/xar may handle it)
+    warn "unrecognized input type: $input — attempting to expand as a package"
+    RESOLVED_PKG="$input"
 }
 
 # ---------------------------------------------------------------------------
@@ -613,6 +745,88 @@ rewrite_one() {  # $1 = file; $2 = pairs file (OLD\034NEW per line)
 }
 
 # ---------------------------------------------------------------------------
+# script sanitization for rootless --run-scripts execution
+# ---------------------------------------------------------------------------
+# sanitize_script <src> <dst> — copy a script from src to dst, rewriting
+# it for safe rootless execution: strip sudo, comment out commands that
+# require elevation (launchctl, installer, /System/ writes, chown root).
+# Binary scripts are copied untouched.
+sanitize_script() {
+    local src="$1" dst="$2"
+    case "$(file -b "$src" 2>/dev/null)" in
+        *binary*) cp "$src" "$dst"; return 0 ;;
+    esac
+    cp "$src" "$dst"
+    # strip 'sudo' prefix (handles sudo, sudo -u user, sudo -u user -s, etc.)
+    # but preserve 'sudo' inside strings/comments by only matching at line start
+    perl -i -pe '
+        # strip leading sudo with optional flags/args
+        s/^[ \t]*sudo(?:\s+-(?:-[ \w-]+|[iuUeIkKp]))*(?:\s+\S+)?\s*//;
+        # also handle sudo -u "user" -s style
+        s/^[ \t]*sudo\b.*// if /^[ \t]*sudo\b/;
+    ' "$dst" 2>/dev/null || true
+    # comment out lines that require elevation and cannot run as current user
+    perl -i -pe '
+        # launchctl load/unload/install — needs root or specific perms
+        s{^([ \t]*)(launchctl\b.+)}{$1# [rootless-sanitized] $2};
+        # installer command — needs root
+        s{^([ \t]*)(installer\b.+)}{$1# [rootless-sanitized] $2};
+        # chown root — needs root
+        s{^([ \t]*)(chown\s+(?:-[rhL]+\s+)*root\b.+)}{$1# [rootless-sanitized] $2};
+        # writes to /System — blocked by SIP even as root
+        s{^([ \t]*)((?:cp|mv|rm|mkdir|chmod)\b.*/System/.+)}{$1# [rootless-sanitized — SIP] $2};
+        # DiskUtility / diskutil eraseVolume — needs root
+        s{^([ \t]*)(diskutil\s+eraseVolume.+)}{$1# [rootless-sanitized] $2};
+    ' "$dst" 2>/dev/null || true
+}
+
+# run_install_scripts <component dir> <mapped home root> — run the
+# pre/post-install scripts of a component with sanitized paths and a
+# home-rooted environment. Scripts run as the current user with
+# sanitized sudo/launchctl/installer commands. Path references are
+# rewritten to match the home-mapped locations.
+run_install_scripts() {
+    local c="$1" home_root="$2"
+    [ -d "$c/Scripts" ] || return 0
+    local rstage
+    rstage=$(mktemp -d "${TMPDIR:-/tmp}/repkger-runscripts.XXXXXX")
+    trap 'rm -rf "${rstage:-}"' RETURN
+    local pairs_file
+    pairs_file=$(mktemp)
+    script_rewrite_pairs > "$pairs_file"
+    local f name
+    for f in "$c"/Scripts/*; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f")
+        case "$name" in preinstall|postinstall) ;; *) continue ;; esac
+        local dst="$rstage/$name"
+        sanitize_script "$f" "$dst"
+        # rewrite path references in the sanitized script to match
+        # the home-mapped locations (so mkdir -p /Applications/... becomes
+        # mkdir -p ~/Applications/...)
+        [ -s "$pairs_file" ] && rewrite_one "$dst" "$pairs_file"
+        chmod +x "$dst"
+        say "  running $name (sanitized for rootless)..."
+        # set up a home-rooted environment like the real installer provides
+        # $1 = path to this script, $2 = path to package, $3 = install location
+        # $4 = root of selected install disk, $5 = / on startup disk
+        DSTROOT="$home_root" \
+            INSTALLER_TEMP="$rstage" \
+            HOME="$home_root" \
+            bash "$dst" \
+                "$dst" \
+                "$(dirname "$c")" \
+                "$home_root" \
+                "/" \
+                "/" \
+                2>&1 | sed 's/^/    /' || \
+            warn "$name exited with non-zero status (continuing)"
+    done
+    rm -f "$pairs_file"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # code signature / quarantine handling
 # ---------------------------------------------------------------------------
 # strip com.apple.quarantine from one path ($1); $2 = "r" for recursive.
@@ -744,11 +958,12 @@ write_record_header() {  # $1 = record file; $2 = pkg path; $3 = pkg sha; $4 = n
 # inspect
 # ---------------------------------------------------------------------------
 cmd_inspect() {
-    local pkg="" json=0 show_scripts=0 files_list=0 files_limit=20
+    local pkg="" json=0 show_scripts=1 files_list=0 files_limit=20
     while [ $# -gt 0 ]; do
         case "$1" in
             --json) json=1; shift ;;
             --show-scripts) show_scripts=1; shift ;;
+            --no-scripts) show_scripts=0; shift ;;
             --files)
                 files_list=1
                 if [ $# -ge 2 ] && printf '%s' "$2" | grep -qE '^[0-9]+$'; then
@@ -759,14 +974,17 @@ cmd_inspect() {
             *) [ -z "$pkg" ] && pkg="$1" || die "unexpected argument: $1"; shift ;;
         esac
     done
-    [ -n "$pkg" ] || die "usage: repkger inspect <file.pkg> [--json] [--show-scripts]"
-    [ -e "$pkg" ] || die "not found: $pkg"
+    [ -n "$pkg" ] || die "usage: repkger inspect <file.pkg> [--json] [--no-scripts]"
+
+    # resolve .dmg/.zip/.bundle/directory inputs to the actual .pkg
+    resolve_pkg_input "$pkg"
+    pkg="$RESOLVED_PKG"
 
     local size sha prod_root title
     size=$(file_size "$pkg")
     sha=$(sha256_of "$pkg")
     EXPAND_TMP=$(mktemp -d "${TMPDIR:-/tmp}/repkger-inspect.XXXXXX")
-    trap 'rm -rf "$EXPAND_TMP"' EXIT
+    trap 'container_cleanup; rm -rf "${EXPAND_TMP:-}"' EXIT
     prod_root=$(expand_pkg "$pkg" "$EXPAND_TMP") || die "cannot expand $pkg (is it an installer package?)"
 
     title=""
@@ -812,11 +1030,48 @@ cmd_inspect() {
         else
             echo "  scripts:         (none)"
         fi
+        # show script content by default (Suspicious Package parity);
+        # --show-scripts is now the default; use --no-scripts to suppress
         if [ "$show_scripts" -eq 1 ]; then
+            local script_auth="${auth:-root}"
             for f in "$c"/Scripts/*; do
                 [ -f "$f" ] || continue
-                echo "  --- $(basename "$f") ---"
-                sed 's/^/    /' "$f" 2>/dev/null | head -80
+                local sname
+                sname=$(basename "$f")
+                local when_text
+                case "$sname" in
+                    preinstall*) when_text="Before moving files into place" ;;
+                    postinstall*) when_text="After moving files into place" ;;
+                    *)            when_text="Unknown (likely referenced by another script)" ;;
+                esac
+                local ssize
+                ssize=$(file_size "$f")
+                local is_binary=0
+                case "$(file -b "$f" 2>/dev/null)" in *binary*) is_binary=1 ;; esac
+                echo "  --- $sname ---"
+                printf '    Name: %s\n' "$sname"
+                printf '    Kind: %s\n' "$(file -b "$f" 2>/dev/null | head -1)"
+                printf '    Size: %s bytes\n' "$ssize"
+                printf '    As User: %s\n' "$script_auth"
+                printf '    When: %s\n' "$when_text"
+                if [ "$is_binary" -eq 1 ]; then
+                    printf '    (binary script — content not shown)\n'
+                else
+                    # highlight sudo/chown-root/launchctl lines that need privileges
+                    local lineno=0
+                    while IFS= read -r line; do
+                        lineno=$((lineno + 1))
+                        local marker=""
+                        case "$line" in
+                            *sudo[[:space:]]*|*sudo\b*)   marker=" ⚠ needs sudo" ;;
+                            *chown*root*)                  marker=" ⚠ needs root" ;;
+                            *launchctl*)                   marker=" ⚠ needs root" ;;
+                            */System/*)                     marker=" ⚠ SIP-protected" ;;
+                            *installer*)                   marker=" ⚠ needs root" ;;
+                        esac
+                        printf '    %3d | %s%s\n' "$lineno" "$line" "$marker"
+                    done < "$f" 2>/dev/null | head -80
+                fi
             done
         fi
         if [ "$files_list" -eq 1 ] && [ -f "$c/Bom" ]; then
@@ -922,12 +1177,15 @@ cmd_install() {
         esac
     done
     [ -n "$pkg" ] || die "usage: repkger install <file.pkg> [options]"
-    [ -e "$pkg" ] || die "not found: $pkg"
     HOME_ROOT="${HOME_ROOT%/}"
     [ -n "$HOME_ROOT" ] || HOME_ROOT="/"
     if [ "$HOME_ROOT" != "/" ] && [ "$DRY" -eq 0 ]; then
         mkdir -p "$HOME_ROOT"
     fi
+
+    # resolve .dmg/.zip/.bundle/directory inputs to the actual .pkg
+    resolve_pkg_input "$pkg"
+    pkg="$RESOLVED_PKG"
 
     require_cmds ditto
     local sha size name ver
@@ -939,7 +1197,7 @@ cmd_install() {
     ver="unknown"
 
     EXPAND_TMP=$(mktemp -d "${TMPDIR:-/tmp}/repkger.XXXXXX")
-    trap 'rm -rf "$EXPAND_TMP"' EXIT
+    trap 'container_cleanup; rm -rf "${EXPAND_TMP:-}"' EXIT
 
     say "== Expanding $pkg =="
     local prod_root
@@ -1044,6 +1302,14 @@ cmd_install() {
                     done < <(find "$dst2/Contents/_CodeSignature" -mindepth 1 -print0)
                     ;;
             esac
+        done
+    fi
+
+    # ---------------- run scripts (if --run-scripts) ----------------
+    if [ "$RUN_SCRIPTS" -eq 1 ]; then
+        echo "== Running install scripts (sanitized for rootless) =="
+        for c in ${comps[@]+"${comps[@]}"}; do
+            run_install_scripts "$c" "$HOME_ROOT"
         done
     fi
 
@@ -1289,8 +1555,11 @@ cmd_bom_redo() {
         esac
     done
     [ -n "$pkg" ] || die "usage: repkger bom-redo <file.pkg> [--home DIR] [--out DIR] [--map SRC=DEST] [--only PREFIX] [--preview]"
-    [ -e "$pkg" ] || die "not found: $pkg"
     HOME_ROOT="${HOME_ROOT%/}"; [ -n "$HOME_ROOT" ] || HOME_ROOT="/"
+
+    # resolve .dmg/.zip/.bundle/directory inputs to the actual .pkg
+    resolve_pkg_input "$pkg"
+    pkg="$RESOLVED_PKG"
 
     local sha name ver
     sha=$(sha256_of "$pkg")
@@ -1299,7 +1568,7 @@ cmd_bom_redo() {
     ver="unknown"
 
     EXPAND_TMP=$(mktemp -d "${TMPDIR:-/tmp}/repkger-bomredo.XXXXXX")
-    trap 'rm -rf "$EXPAND_TMP"' EXIT
+    trap 'container_cleanup; rm -rf "${EXPAND_TMP:-}"' EXIT
 
     say "== Expanding $pkg =="
     local prod_root
@@ -1654,15 +1923,9 @@ PY
 # ---------------------------------------------------------------------------
 # cleanup for the brew wrapper's dmg/zip container handling (EXIT trap):
 # detach a mounted volume, drop the extract dir. No-ops when unused.
+# now delegates to container_cleanup which handles both CASK_* and CONTAINER_* vars
 cask_cleanup() {
-    if [ -n "$CASK_MNT" ] && [ -d "$CASK_MNT" ]; then
-        hdiutil detach "$CASK_MNT" >/dev/null 2>&1 \
-            || hdiutil detach -force "$CASK_MNT" >/dev/null 2>&1 || true
-    fi
-    if [ -n "$CASK_STAGE" ] && [ -d "$CASK_STAGE" ]; then
-        rm -rf "$CASK_STAGE"
-    fi
-    CASK_MNT=""; CASK_STAGE=""
+    container_cleanup
 }
 
 cmd_brew() {

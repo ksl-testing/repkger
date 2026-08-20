@@ -34,13 +34,17 @@ on the web / mobile app).
 ## Quick start (CLI)
 
 ```bash
-bin/repkger inspect  ~/Downloads/GameMaker-2024.14.4.222.pkg   # read it like Suspicious Package
-bin/repkger inspect  ~/Downloads/GameMaker-2024.14.4.222.pkg --files 25   # + where each file lands
-bin/repkger install  ~/Downloads/GameMaker-2024.14.4.222.pkg   # home-rooted install
-bin/repkger bom-redo ~/Downloads/GameMaker-2024.14.4.222.pkg   # repack BOM+payload to ~/ locations
-bin/repkger bom-redo ~/Downloads/GameMaker-2024.14.4.222.pkg --preview   # predictive BOM first (like Suspicious Package), builds nothing
-bin/repkger bom-redo ~/Downloads/GameMaker-2024.14.4.222.pkg --only /Applications   # targeted: only that subtree
-bin/repkger install  ~/Downloads/GameMaker-2024.14.4.222.pkg --only /Applications   # targeted direct extraction
+bin/repkger inspect  ~/Downloads/GameMaker-2026.0.0.16.pkg   # read it like Suspicious Package
+bin/repkger inspect  ~/Downloads/GameMaker-2026.0.0.16.dmg   # auto-mounts DMG, finds inner .pkg
+bin/repkger inspect  ~/Downloads/GameMaker.zip               # extracts zip, finds inner .pkg
+bin/repkger inspect  ~/Downloads/GameMaker.app               # .bundle — works as-is (flat XAR)
+bin/repkger inspect  ~/Downloads/GameMaker-2026.0.0.16.pkg --files 25   # + where each file lands
+bin/repkger install  ~/Downloads/GameMaker-2026.0.0.16.dmg   # home-rooted install from .dmg
+bin/repkger install  ~/Downloads/GameMaker-2026.0.0.16.dmg --run-scripts  # sanitize & run pre/postinstall
+bin/repkger bom-redo ~/Downloads/GameMaker-2026.0.0.16.pkg   # repack BOM+payload to ~/ locations
+bin/repkger bom-redo ~/Downloads/GameMaker-2026.0.0.16.pkg --preview   # predictive BOM first (like Suspicious Package), builds nothing
+bin/repkger bom-redo ~/Downloads/GameMaker-2026.0.0.16.pkg --only /Applications   # targeted: only that subtree
+bin/repkger install  ~/Downloads/GameMaker-2026.0.0.16.pkg --only /Applications   # targeted direct extraction
 bin/repkger list                                                # installed records
 bin/repkger uninstall com.yoyogames.gms2 --yes                  # reverse an install
 bin/repkger brew --cask gamemaker                               # rootless install of a pkg-style cask
@@ -189,6 +193,10 @@ and posts a notification when done. The CLI is embedded in the app bundle
 
 ## Design
 
+- **Container resolution** (`resolve_pkg_input`): auto-detects `.pkg`, `.mpkg`,
+  `.bundle` (flat XAR), `.dmg` (mounts read-only, finds inner `.pkg`),
+  `.zip` / `.tar*` (extracts to temp dir), or a directory containing a `.pkg`.
+  DMG mounts and temp dirs are cleaned up automatically via EXIT trap.
 - Expand: `pkgutil --expand-full` (extracts payloads to dirs; handles modern
   compression). Fallback: `xar` + manual `gunzip|cpio` / `pbzx`.
 - Map: user `--map SRC=DEST` > keep-if-writable > world-writable-keep
@@ -239,6 +247,17 @@ and posts a notification when done. The CLI is embedded in the app bundle
   preserved. `--preview` shows the estimate (refs home-mapped + any lines
   that still need privileges and cannot be mapped: sudo/chown-root/
   launchctl/installer/System).
+- **Script inspection** (default in `inspect`): Suspicious Package-style
+  output — each script shows Name, Kind, Size, As User (from `auth`
+  attribute), When (inferred from script name), and line-numbered content.
+  Lines with `sudo`, `chown root`, `launchctl`, `/System/` paths are
+  flagged with warnings. Use `--no-scripts` to suppress.
+- **Script sanitization** (`--run-scripts`): pre/post-install scripts are
+  sanitized for rootless execution before running — `sudo` prefixes are
+  stripped, `launchctl`/`installer`/`chown root`/`/System/` writes are
+  commented out, binary scripts are copied untouched. Path references are
+  rewritten to match the home-mapped locations. Scripts run in a
+  home-rooted environment (`DSTROOT`, `HOME`, etc.).
 - Scripts: never run by default; recorded (name + md5) for auditing;
   `--run-scripts` opts in.
 

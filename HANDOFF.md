@@ -4,7 +4,35 @@ A cacheless agent can pick up from this file. Read `README.md`, `llms.md`,
 `llms/STATUS.md`, `llms/ROADMAP.md`, and `NOTES.md` for depth; this is the
 state + next steps.
 
-## Session update (2026-08-19) — v0.4.0: two-tier production build + launch bug fixes
+## Session update (2026-08-20) — v0.5.0: container input support + script sanitization
+
+**The tool now opens .dmg, .zip, .bundle, and directories containing .pkg files**
+in addition to raw .pkg/.mpkg. This is the "unpkg on steroids" upgrade — it
+not only extracts like unpkg, but rewrites paths to ~/ locations, sanitizes
+scripts for rootless execution, and inspects packages like Suspicious Package.
+
+Three features shipped in `bin/repkger` (v0.5.0, version bumped):
+
+- **Container resolution** (`resolve_pkg_input`): `inspect`, `install`, and
+  `bom-redo` now accept `.dmg` (auto-mounts via hdiutil, finds inner .pkg,
+  auto-detaches), `.zip`/`.tar*` (extracts, finds inner .pkg), `.bundle`
+  (flat XAR, works as-is), or a directory containing a .pkg. DMG mounts and
+  temp dirs cleaned up via EXIT trap.
+- **Script sanitization** (`--run-scripts` now works!): pre/post-install scripts
+  are sanitized for rootless execution — `sudo` prefixes stripped, `launchctl`/
+  `installer`/`chown root`/`/System/` writes commented out, path references
+  rewritten to home-mapped locations, scripts run in home-rooted environment.
+- **Enhanced inspect output** (Suspicious Package parity): script content shown
+  by default with Name, Kind, Size, As User, When, line-numbered content,
+  and privilege warnings. New `--no-scripts` flag to suppress.
+
+`test/roundtrip.sh` now **104/104** (was 82): phase 6 covers .dmg/.bundle/
+.zip/directory input; phase 7 covers script sanitization and enhanced inspect.
+Docs updated: README (quick start + design), NOTES (items 18-22).
+
+**Committed and pushed.**
+
+## Previous: Session update (2026-08-19) — v0.4.0: two-tier production build + launch bug fixes
 
 **Production architecture is live.** Two apps built and verified:
 
