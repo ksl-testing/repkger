@@ -304,3 +304,38 @@
     Phase 7 (10 checks): enhanced inspect output (As User, When, Kind, line
     numbers), `--no-scripts`, `--run-scripts` with path rewriting + sudo
     sanitization.
+
+## .dmg real-world fixes (v0.5.0 — 2026-08-27)
+
+23. **Root-owned expanded files**: `pkgutil --expand-full` preserves cpio file
+    ownership, so expanded payloads may contain root-owned dirs/files. The
+    EXIT trap's `rm -rf` fails under `set -euo pipefail`. Fixed with
+    `safe_rm_rf()` — does `chmod -R +w` first, then `rm -rf`, with `|| true`
+    fallback. All three EXIT traps (inspect, install, bom-redo) use it.
+24. **Directory permissions from cpio lack execute bit**: some pkgs (Wacom)
+    record dirs with mode `0644` (no +x), making them untraversable by any
+    tool (ditto, rsync, cp, ls). Fixed: `find "$dir" -type d -exec chmod
+    +x {} +` after EVERY expansion path in `expand_pkg()` (bundle loop,
+    pkgutil path, xar fallback). Also added rsync fallback in `merge_tree`
+    when `ditto` fails (`rsync -a --no-perms --no-owner --no-group`).
+25. **Verified: WacomTablet_6.4.14-1.dmg** installs cleanly — 6550 files to
+    ~/wacom-test, 18 path rewrites, 7 app bundles re-signed, 0 errors.
+
+## Homebrew-tap integration (v0.5.0 — 2026-08-27)
+
+26. **Formula/repkger.rb** (new in ksl-testing/homebrew-tap): installs the
+    repkger bash script from GitHub releases. `brew install
+    ksl-testing/tap/repkger` puts `repkger` on PATH. Livecheck tracks new
+    releases.
+27. **wacom-ptk460.rb** (updated): added `depends_on formula: "repkger"` so
+    brew auto-installs the formula before the cask. Fixed sha256 (was
+    placeholder), removed invalid `--data` flag, replaced nonexistent
+    `repkger uninstall` with `uninstall delete:` list of all Wacom paths.
+28. **clip-studio-paint.rb** (simplified 139→58 lines): replaced 60-line
+    hand-written `portable_install.sh` preflight with a 3-line repkger
+    command. repkger handles everything: expand pkg, extract payloads, merge
+    to ~/, de-quarantine, re-sign, path rewrite. Added `depends_on formula:
+    "repkger"`.
+29. **tpl-bootkit pkgs/Brewfile**: added `brew "ksl-testing/tap/repkger"`
+    so the formula is installed during bootstrap, before any cask that
+    depends on it.

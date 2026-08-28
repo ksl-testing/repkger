@@ -4,6 +4,49 @@ A cacheless agent can pick up from this file. Read `README.md`, `llms.md`,
 `llms/STATUS.md`, `llms/ROADMAP.md`, and `NOTES.md` for depth; this is the
 state + next steps.
 
+## Session update (2026-08-27) — .dmg fixes + homebrew-tap integration
+
+**Two bugs fixed in repkger that broke real-world DMG installers:**
+
+1. **Root-owned expanded files** — `pkgutil --expand-full` preserves cpio
+   ownership, creating root-owned dirs/files. The EXIT trap's `rm -rf` failed
+   under `set -e`. Fixed with `safe_rm_rf()` (chmod +x before rm, || true).
+2. **Directory permissions from cpio lack execute bit** — some pkgs (Wacom)
+   record dirs with mode `0644` (no +x), making them untraversable. `ditto`,
+   `rsync`, `cp` all fail with "Permission denied". Fixed: `find -type d
+   -exec chmod +x {} +` after every expansion path in `expand_pkg()`. Also
+   added `rsync --no-perms --no-owner --no-group` fallback in `merge_tree`
+   when `ditto` fails.
+
+**Verified: WacomTablet_6.4.14-1.dmg installs cleanly** — 6550 files extracted
+   to ~/wacom-test, 18 path rewrites, 7 app bundles re-signed. inspect also
+   exits cleanly (no more permission errors on cleanup).
+
+**Homebrew-tap integration (3 files across 2 repos):**
+
+1. **`Formula/repkger.rb`** (new in ksl-testing/homebrew-tap) — Homebrew
+   formula that installs the repkger bash script from GitHub releases.
+   `brew install ksl-testing/tap/repkger` puts `repkger` on PATH. Livecheck
+   tracks new releases.
+2. **`Casks/wacom-ptk460.rb`** (updated) — added `depends_on formula:
+   "repkger"`, fixed sha256 (was placeholder), removed invalid `--data` flag,
+   replaced nonexistent `repkger uninstall` with `uninstall delete:` list.
+3. **`Casks/clip-studio-paint.rb`** (simplified 139→58 lines) — replaced
+   60-line hand-written `portable_install.sh` preflight with a 3-line repkger
+   command. repkger handles everything: expand pkg, extract payloads, merge
+   to ~/, de-quarantine, re-sign, path rewrite.
+4. **tpl-bootkit `pkgs/Brewfile`** — added `brew "ksl-testing/tap/repkger"`
+   so the formula is installed during bootstrap.
+
+All files pass `brew style`. Changes committed and pushed.
+
+## TODO
+
+- **TEST: GameMaker** — download https://gamemaker.io/en/download/mac/lts/GameMaker.pkg
+  and verify `repkger install GameMaker.pkg --home ~/Applications` works rootless.
+- **TABLED: Unity Editor** — Unity-6000.5.10f1.pkg (editor only, no hub)
+  for later.
+
 ## Session update (2026-08-20) — v0.5.0: container input support + script sanitization
 
 **The tool now opens .dmg, .zip, .bundle, and directories containing .pkg files**

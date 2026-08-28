@@ -306,13 +306,22 @@ set_only_matches() {  # $1 = component install-location; normalize relative --on
 # ---------------------------------------------------------------------------
 # container cleanup (dmg mount / zip extract)
 # ---------------------------------------------------------------------------
+# safe_rm_rf — remove a directory tree that may contain root-owned files
+# (from pkgutil --expand-full). Tries chmod -R +w first, falls back to
+# best-effort removal so the caller never fails.
+safe_rm_rf() {
+    [ -d "$1" ] || return 0
+    chmod -R +w "$1" 2>/dev/null || true
+    rm -rf "$1" 2>/dev/null || true
+}
+
 container_cleanup() {
     if [ -n "$CONTAINER_MNT" ] && [ -d "$CONTAINER_MNT" ]; then
         hdiutil detach "$CONTAINER_MNT" >/dev/null 2>&1 \
             || hdiutil detach -force "$CONTAINER_MNT" >/dev/null 2>&1 || true
     fi
     if [ -n "$CONTAINER_STAGE" ] && [ -d "$CONTAINER_STAGE" ]; then
-        rm -rf "$CONTAINER_STAGE"
+        safe_rm_rf "$CONTAINER_STAGE"
     fi
     CONTAINER_MNT=""; CONTAINER_STAGE=""
     # also clean up legacy cask vars
@@ -321,7 +330,7 @@ container_cleanup() {
             || hdiutil detach -force "$CASK_MNT" >/dev/null 2>&1 || true
     fi
     if [ -n "$CASK_STAGE" ] && [ -d "$CASK_STAGE" ]; then
-        rm -rf "$CASK_STAGE"
+        safe_rm_rf "$CASK_STAGE"
     fi
     CASK_MNT=""; CASK_STAGE=""
 }
@@ -463,12 +472,14 @@ expand_pkg() {  # $1 = pkg path; $2 = expand dir; echoes the component root dir
             fi
         done
         : > "$dir/.repkger-expanded"
+        find "$dir" -type d -exec chmod +x {} + 2>/dev/null || true
         echo "$dir"
         return 0
     fi
     if command -v pkgutil >/dev/null 2>&1; then
         if pkgutil --expand-full "$pkg" "$dir" >/dev/null 2>&1; then
             : > "$dir/.repkger-expanded"
+            find "$dir" -type d -exec chmod +x {} + 2>/dev/null || true
             echo "$dir"
             return 0
         fi
@@ -478,6 +489,9 @@ expand_pkg() {  # $1 = pkg path; $2 = expand dir; echoes the component root dir
     mkdir -p "$dir"
     xar -xf "$pkg" -C "$dir" || die "failed to expand $pkg"
     : > "$dir/.repkger-expanded"
+    # fix directory permissions: some pkgs record dirs with 0644 (no +x)
+    # which prevents traversal. Capital X adds +x to dirs only.
+    find "$dir" -type d -exec chmod +x {} + 2>/dev/null || true
     echo "$dir"
 }
 
@@ -603,7 +617,12 @@ merge_tree() {
                 # — create the link directly so it stays a symlink
                 ln -s "$(readlink "$c")" "$mc"
             else
-                ditto "$c" "$mc" 2>/dev/null || die "failed to copy $c -> $mc"
+                if ! ditto "$c" "$mc" 2>/dev/null; then
+                    # ditto failed (likely root-owned files in expanded payload);
+                    # fall back to rsync which ignores ownership
+                    rsync -a --no-perms --no-owner --no-group "$c/" "$mc/" 2>/dev/null \
+                        || die "failed to copy $c -> $mc (both ditto and rsync failed)"
+                fi
             fi
             MERGED_DIRS+=("$mc")
             [ "$VERBOSE" -eq 1 ] && say "  merged: ${mc#$HOME_ROOT/}"
@@ -984,7 +1003,7 @@ cmd_inspect() {
     size=$(file_size "$pkg")
     sha=$(sha256_of "$pkg")
     EXPAND_TMP=$(mktemp -d "${TMPDIR:-/tmp}/repkger-inspect.XXXXXX")
-    trap 'container_cleanup; rm -rf "${EXPAND_TMP:-}"' EXIT
+    trap 'container_cleanup; safe_rm_rf "${EXPAND_TMP:-}"' EXIT
     prod_root=$(expand_pkg "$pkg" "$EXPAND_TMP") || die "cannot expand $pkg (is it an installer package?)"
 
     title=""
@@ -1197,7 +1216,7 @@ cmd_install() {
     ver="unknown"
 
     EXPAND_TMP=$(mktemp -d "${TMPDIR:-/tmp}/repkger.XXXXXX")
-    trap 'container_cleanup; rm -rf "${EXPAND_TMP:-}"' EXIT
+    trap 'container_cleanup; safe_rm_rf "${EXPAND_TMP:-}"' EXIT
 
     say "== Expanding $pkg =="
     local prod_root
@@ -1568,7 +1587,7 @@ cmd_bom_redo() {
     ver="unknown"
 
     EXPAND_TMP=$(mktemp -d "${TMPDIR:-/tmp}/repkger-bomredo.XXXXXX")
-    trap 'container_cleanup; rm -rf "${EXPAND_TMP:-}"' EXIT
+    trap 'container_cleanup; safe_rm_rf "${EXPAND_TMP:-}"' EXIT
 
     say "== Expanding $pkg =="
     local prod_root

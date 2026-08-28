@@ -13,7 +13,7 @@ Gatekeeper won't flag the freshly installed apps.
 ## Install
 
 ```bash
-brew install ksl-testing/tap/repkgr        # CLI (alias: ksl-testing/tap/repkger)
+brew install ksl-testing/tap/repkger        # CLI (Homebrew formula in ksl-testing/homebrew-tap)
 ```
 
 Or grab an asset from the [GitHub releases page](https://github.com/ksl-testing/repkger/releases):
@@ -26,8 +26,8 @@ Or grab an asset from the [GitHub releases page](https://github.com/ksl-testing/
 **How the pipeline works:** every push to `main` that touches repkger sources
 runs the test suite (fixture round-trip + GUI build) on macOS, then publishes a
 GitHub release tagged `v<REPKGER_VERSION>` with those assets, and refreshes the
-`ksl-testing/homebrew-tap` formula (`tap/repkgr.rb`) so `brew install
-ksl-testing/tap/repkgr` always gets the latest build. Run it manually any time
+`ksl-testing/homebrew-tap` formula (`Formula/repkger.rb`) so `brew install
+ksl-testing/tap/repkger` always gets the latest build. Run it manually any time
 from anywhere: `gh workflow run build-release.yml` (or the repo's Actions tab
 on the web / mobile app).
 
