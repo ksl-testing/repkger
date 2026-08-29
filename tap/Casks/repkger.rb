@@ -20,17 +20,13 @@ cask "repkger" do
 
   app "Repkger.app"
 
-  # The CLI is embedded inside the .app — expose it on PATH for terminal users
-  # (so `repkger` works without also running `repkger self-install`).
-  postflight do
-    cli = "#{appdir}/Repkger.app/Contents/Resources/repkger"
-    if File.exist?(cli)
-      (HOMEBREW_PREFIX/"bin").install Symlink.new(cli)
-    end
-  end
+  # The CLI is embedded inside the .app — the `binary` stanza symlinks it into
+  # HOMEBREW_PREFIX/bin so `repkger` works after a plain `brew install --cask`
+  # (no need to also run `repkger self-install`). Rootless: it's just a symlink
+  # at the app's bundled copy — no copy, no sudo.
+  binary "#{appdir}/Repkger.app/Contents/Resources/repkger", target: "repkger"
 
-  uninstall delete: ["#{HOMEBREW_PREFIX}/bin/repkger"],
-            rmdir:  ["#{appdir}/Repkger.app"]
+  uninstall delete: ["#{appdir}/Repkger.app"]
 
   zap trash: ["#{appdir}/Repkger.app"]
 end
