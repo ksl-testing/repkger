@@ -220,6 +220,39 @@ fi
 check "brew --rpkg: still no installer call" \
     test "$(grep -vc '^info ' "$FAKE_LOG" || true)" -eq 0
 
+# --- brew install --cask WITHOUT --rpkg: default rootless for pkg casks ---
+: > "$FAKE_LOG"
+check "brew install --cask (no --rpkg): pkg cask installs rootlessly" \
+    env PATH="$BIN4:$PATH" HOME="$H4" REPKGER_DATA="$D4" BREW_FAKE_JSON="$BIN4/brew-pkg.json" FAKE_LOG="$FAKE_LOG" \
+        "$R" brew install --cask rpkgdefault
+check "brew install --cask: app landed in HOME/Applications" \
+    test -x "$H4/Applications/MiniApp.app/Contents/MacOS/miniapp"
+check "brew install --cask (no --rpkg): fake brew only saw 'info' (no installer call)" \
+    test "$(grep -vc '^info ' "$FAKE_LOG" || true)" -eq 0
+check "brew install --cask (no --rpkg): record written" \
+    test -n "$(ls -d "$D4"/records/* 2>/dev/null | head -1)"
+REPKGER_DATA="$D4" "$R" uninstall "$(ls -d "$D4"/records/* | head -1)" --yes >/dev/null 2>&1 || true
+rm -f /Users/Shared/mini-shared.txt /tmp/mini-tmp.txt
+
+# --- brew install --cask --rootless: same as --rpkg (force rootless, die on non-pkg) ---
+check "brew --rootless: pkg cask installs rootlessly" \
+    env PATH="$BIN4:$PATH" HOME="$H4" REPKGER_DATA="$D4" BREW_FAKE_JSON="$BIN4/brew-pkg.json" FAKE_LOG="$FAKE_LOG" \
+        "$R" brew install --cask --rootless rootlesstest
+check "brew --rootless: app landed in HOME/Applications" \
+    test -x "$H4/Applications/MiniApp.app/Contents/MacOS/miniapp"
+check "brew --rootless: fake brew only saw 'info' (no installer call)" \
+    test "$(grep -vc '^info ' "$FAKE_LOG" || true)" -eq 0
+REPKGER_DATA="$D4" "$R" uninstall "$(ls -d "$D4"/records/* | head -1)" --yes >/dev/null 2>&1 || true
+rm -f /Users/Shared/mini-shared.txt /tmp/mini-tmp.txt
+
+# unsupported artifact + --rootless must FAIL LOUD, never fall through to brew
+if env PATH="$BIN4:$PATH" HOME="$H4" REPKGER_DATA="$D4" BREW_FAKE_JSON="$BIN4/brew-other.json" FAKE_LOG="$FAKE_LOG" \
+        "$R" brew install --cask --rootless notapkg >/dev/null 2>&1; then
+    bad "brew --rootless: unsupported artifact must die (not fall through to installer)"
+else
+    ok "brew --rootless: unsupported artifact dies with an error (no silent installer)"
+fi
+
 # zip cask that CONTAINS a .pkg
 FAKE_ZIP="$BIN4/FakeCask.zip"
 rm -rf "$BIN4/zippkg" && mkdir -p "$BIN4/zippkg"

@@ -90,7 +90,11 @@ if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
     echo ">> refreshing existing release $TAG"
     gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag
 fi
-gh release create "$TAG" "$dist"/* \
+gh release create "$TAG" \
+    "$dist/repkger" \
+    "$dist/repkger-$version.zip" \
+    "$dist/Repkger-$version.app.zip" \
+    "$dist/SHA256SUMS.txt" \
     --repo "$REPO" \
     --title "repkger v$version" \
     --notes-file "$NOTES"

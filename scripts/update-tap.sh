@@ -9,7 +9,8 @@
 #
 # Required env:
 #   VERSION       repkger version, e.g. 0.2.0
-#   CLI_SHA256    sha256 of the repkger-<VERSION>.zip release asset
+#   CLI_SHA256    sha256 of the repkger-<VERSION>.zip release asset (the CLI formula)
+#   APP_SHA256    sha256 of the Repkger-<VERSION>.app.zip release asset (the GUI cask)
 #   TAP_TOKEN     GitHub PAT with repo scope. When unset the script prints a
 #                 notice and exits 0 (the release itself still succeeds — the
 #                 tap just isn't updated until a PAT is configured).
@@ -37,36 +38,46 @@ TAP_REPO="${TAP_REPO:-ksl-testing/homebrew-tap}"
 
 VERSION="${VERSION:-}"
 CLI_SHA256="${CLI_SHA256:-}"
+APP_SHA256="${APP_SHA256:-}"
 TAP_TOKEN="${TAP_TOKEN:-}"
 
-if [ -z "$VERSION" ] || [ -z "$CLI_SHA256" ]; then
-    echo "update-tap: VERSION and CLI_SHA256 are required" >&2
+if [ -z "$VERSION" ] || [ -z "$CLI_SHA256" ] || [ -z "$APP_SHA256" ]; then
+    echo "update-tap: VERSION, CLI_SHA256 and APP_SHA256 are required" >&2
     exit 1
 fi
 printf '%s' "$CLI_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
     || { echo "update-tap: CLI_SHA256 must be 64 hex chars (got: $CLI_SHA256)" >&2; exit 1; }
+printf '%s' "$APP_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
+    || { echo "update-tap: APP_SHA256 must be 64 hex chars (got: $APP_SHA256)" >&2; exit 1; }
 
 URL="https://github.com/$REPO/releases/download/v$VERSION/repkger-$VERSION.zip"
+URL_APP="https://github.com/$REPO/releases/download/v$VERSION/Repkger-$VERSION.app.zip"
 
 render() {  # $1 = template file -> stdout with placeholders substituted
     sed -e "s|__URL__|$URL|g" \
         -e "s|__SHA256__|$CLI_SHA256|g" \
+        -e "s|__URL_APP__|$URL_APP|g" \
+        -e "s|__SHA256_APP__|$APP_SHA256|g" \
         -e "s|__VERSION__|$VERSION|g" "$1"
 }
 
 render_formulas() {  # $1 = tap repo dir (must exist)
-    mkdir -p "$1/Formula"
-    render "$tmpl_dir/repkgr.rb"  > "$1/Formula/repkgr.rb"
-    render "$tmpl_dir/repkger.rb" > "$1/Formula/repkger.rb"
+    mkdir -p "$1/Formula" "$1/Casks"
+    render "$tmpl_dir/repkgr.rb"    > "$1/Formula/repkgr.rb"
+    render "$tmpl_dir/repkger.rb"   > "$1/Formula/repkger.rb"
+    if [ -f "$tmpl_dir/Casks/repkger.rb" ]; then
+        render "$tmpl_dir/Casks/repkger.rb" > "$1/Casks/repkger.rb"
+    fi
     render "$tmpl_dir/README.md"  > "$1/README.md"
 }
 
 if [ "$DRY" -eq 1 ]; then
     echo "== would publish $TAP_REPO (version $VERSION, sha256 $CLI_SHA256) =="
     echo "== url: $URL =="
-    for f in repkgr.rb repkger.rb; do
+    for f in repkgr.rb repkger.rb Casks/repkger.rb; do
+        [ -f "$tmpl_dir/$f" ] || continue
         echo
-        echo "--- Formula/$f ---"
+        echo "--- ${f%/*}/${f##*/} ---"
         render "$tmpl_dir/$f"
     done
     exit 0
@@ -108,7 +119,7 @@ git config user.name "repkger release bot"
 git config user.email "noreply@github.com"
 
 render_formulas "$tmp/tap"
-git add Formula/repkgr.rb Formula/repkger.rb README.md
+git add Formula/repkgr.rb Formula/repkger.rb Casks/repkger.rb README.md
 if git diff --cached --quiet; then
     echo "update-tap: no formula changes (tap already at v$VERSION)"
 else
@@ -122,5 +133,6 @@ if ! git push -q origin "HEAD:$BR"; then
     echo "update-tap: push to $BR failed, retrying master" >&2
     git push -q origin HEAD:master
 fi
-echo "update-tap: pushed Formula/repkgr.rb + Formula/repkger.rb to $TAP_REPO ($BR)"
-echo "            next: brew install ksl-testing/tap/repkgr"
+echo "update-tap: pushed Formula/repkgr.rb + Formula/repkger.rb + Casks/repkger.rb to $TAP_REPO ($BR)"
+echo "            next: brew install ksl-testing/tap/repkger   (CLI formula)"
+echo "            next: brew install --cask ksl-testing/tap/repkger   (GUI cask)"

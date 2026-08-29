@@ -40,16 +40,23 @@
 #       Show all install records.
 #   repkger brew [brew args...]
 #       brew wrapper: intercepts `install --cask <name>` for casks whose
-#       artifact is a .pkg (e.g. gamemaker) and installs rootlessly instead;
-#       passes everything else through to the real brew. Add `--rpkg` to
-#       FORCE the rootless strategy for a pkg cask and NEVER fall through to
-#       brew's pkg installer (which needs sudo). --rpkg also handles dmg/zip
-#       casks that CONTAIN a .pkg/.mpkg (mounted/extracted, inner pkg
-#       installed rootlessly, then cleaned up); any other artifact type dies
-#       loudly instead of falling through:
-#         repkger brew install --cask --rpkg gamemaker
+#       artifact is a .pkg (e.g. gamemaker) and installs rootlessly
+#       instead; passes everything else through to the real brew.
+#       Add --rootless / --rpkg / -r to FORCE the rootless strategy for
+#       a pkg cask and NEVER fall through to brew's pkg installer
+#       (which needs sudo). --rootless also handles dmg/zip casks that
+#       CONTAIN a .pkg/.mpkg (mounted/extracted, inner pkg installed
+#       rootlessly, then cleaned up); any other artifact type dies
+#       loudly instead of falling through. After a rootless cask install,
+#       repkger writes a Homebrew Caskroom receipt so `brew list --cask
+#       <name>` shows it (remove with `repkger brew unlink <name>`):
+#         repkger brew install --cask gamemaker
+#         repkger brew install --cask --rootless gamemaker
+#         rbrew install --cask gamemaker      # force rootless, standalone
+#         rpkg ...                            # alias for `repkger ...`
 #       (the `brew()` shim from `repkger self-install` lets you type
-#        `brew install --cask --rpkg gamemaker` directly).
+#        `brew install --cask gamemaker` directly, routing through
+#        repkger automatically).
 #   repkger gui [pkg...]
 #       Open the Repkger.app GUI (falls back to a plain prompt otherwise).
 #   repkger self-install [--bash]
@@ -88,7 +95,7 @@
 
 set -euo pipefail
 
-REPKGER_VERSION="0.5.1"
+REPKGER_VERSION="0.5.2"
 REPKGER_DATA="${REPKGER_DATA:-$HOME/.repkger}"
 RECORDS_DIR="$REPKGER_DATA/records"
 CACHE_DIR="$REPKGER_DATA/cache"
@@ -1947,17 +1954,112 @@ cask_cleanup() {
     container_cleanup
 }
 
+# Derive Homebrew's prefix WITHOUT executing `brew` (so the brew-wrapper tests,
+# which stub `brew`, never see a spurious call). Resolves the brew binary's
+# location and walks up to its prefix (<prefix>/bin/brew -> <prefix>).
+brew_prefix() {
+    local b dir
+    b=$(command -v brew 2>/dev/null) || return 1
+    [ -n "$b" ] || return 1
+    dir=$(cd "$(dirname "$b")/.." && pwd 2>/dev/null) || return 1
+    [ -d "$dir" ] || return 1
+    echo "$dir"
+}
+
+# Locate the record dir for a cask name (matches a 'cask<TAB><name>' line, or a
+# 'name<TAB><name>' line for direct installs that predate the cask-line write).
+cask_record_dir() {
+    local name="$1" r
+    [ -n "$name" ] || return 1
+    [ -d "$RECORDS_DIR" ] || return 1
+    for r in "$RECORDS_DIR"/*; do
+        [ -f "$r/record.tsv" ] || continue
+        if awk -F'\t' -v n="$name" '
+               BEGIN { lc=tolower(n) }
+               $1=="cask"   && $2==n {f=1}
+               $1=="name"    && $2==n {f=1}
+               tolower($0) ~ lc        {f=1}
+               END {exit !f}' "$r/record.tsv"; then
+            echo "$r"; return 0
+        fi
+    done
+    return 1
+}
+
+# Resolve the installed .app for a record (exact path from the record's file
+# entries; falls back to scanning the component dir).
+cask_app_path() {
+    local rec="$1" home comp appdir
+    app=$(awk -F'\t' '$1=="file" && $3=="dir" && $2 ~ /\.app$/{print $2; exit}' "$rec/record.tsv")
+    [ -n "$app" ] && { echo "$app"; return 0; }
+    home=$(awk -F'\t' '$1=="home_root"{print $2; exit}' "$rec/record.tsv")
+    [ -n "$home" ] || home="$HOME"
+    comp=$(awk -F'\t' '$1=="component"{print $4; exit}' "$rec/record.tsv")
+    appdir="$home${comp:-/Applications}"
+    find "$appdir" -maxdepth 1 -name '*.app' 2>/dev/null | head -1
+}
+
+# Write a Homebrew Caskroom receipt so `brew list --cask <name>` reports the
+# rootless install. <name> is the cask token; <rec> optionally a record dir.
+cask_link_receipt() {
+    local name="${1:-}" rec="${2:-}" app ver stagedir caskdir meta prefix caskroom
+    [ -n "$name" ] || { echo "cask_link_receipt: no cask name" >&2; return 1; }
+    prefix=$(brew_prefix 2>/dev/null) || prefix="${HOMEBREW_PREFIX:-}"
+    [ -n "$prefix" ] || { echo "could not locate Homebrew prefix" >&2; return 1; }
+    caskroom="$prefix/Caskroom"
+    mkdir -p "$caskroom" || { echo "cannot create $caskroom" >&2; return 1; }
+    [ -z "$rec" ] && rec=$(cask_record_dir "$name")
+    [ -n "$rec" ] || { echo "no record for cask '$name' — install it first" >&2; return 1; }
+    app=$(cask_app_path "$rec")
+    [ -n "$app" ] || { echo "no .app found for cask '$name' under record $rec" >&2; return 1; }
+    ver=$(awk -F'\t' '$1=="version"{print $2; exit}' "$rec/record.tsv")
+    [ -n "$ver" ] || ver="latest"
+    caskdir="$caskroom/$name"
+    stagedir="$caskdir/$ver"
+    meta="$caskdir/.metadata/$ver"
+    mkdir -p "$stagedir" "$meta"
+    ln -sf "$app" "$stagedir/$(basename "$app")"
+    cat > "$meta/INSTALL_RECEIPT.json" <<EOF
+{
+  "cask": "$name",
+  "version": "$ver",
+  "stage_path": "$caskdir",
+  "installed_on": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "source": { "repkger": "rootless" }
+}
+EOF
+    if ! awk -F'\t' -v n="$name" '$1=="cask" && $2==n{f=1} END{exit !f}' "$rec/record.tsv"; then
+        printf 'cask\t%s\n' "$name" >> "$rec/record.tsv"
+    fi
+    say "linked cask '$name' -> $stagedir/$(basename "$app")"
+    say "  brew list --cask $name should now report it"
+}
+
+cask_unlink_receipt() {
+    local name="${1:-}" prefix caskroom caskdir
+    [ -n "$name" ] || { echo "cask_unlink_receipt: no cask name" >&2; return 1; }
+    prefix=$(brew_prefix 2>/dev/null) || prefix="${HOMEBREW_PREFIX:-}"
+    [ -n "$prefix" ] || { echo "could not locate Homebrew prefix" >&2; return 1; }
+    caskroom="$prefix/Caskroom"
+    caskdir="$caskroom/$name"
+    [ -d "$caskdir" ] || { echo "cask '$name' is not linked" >&2; return 1; }
+    rm -rf "$caskdir"
+    say "unlinked cask '$name' (removed $caskdir)"
+}
+
 cmd_brew() {
     [ $# -gt 0 ] || { warn "usage: repkger brew <brew args...>"; exec brew "$@" 2>/dev/null || true; }
-    # --rpkg = FORCE the rootless repkger strategy for a pkg cask: never fall
-    # through to real brew (which would run the cask's pkg installer with sudo).
-    # --map SRC=DEST is passed through to the rootless install (e.g. Unity Hub
-    # layout: --map "/Applications/Unity/Unity=$HOME/Applications/Unity/Hub/Editor/<ver>").
-    local cask="" i rpkg=0 lastarg="" skipnext=0
+    # --rootless = alias for --rpkg: FORCE the rootless repkger
+    # strategy for a pkg cask: never fall through to real brew
+    # (which would run the cask's pkg installer with sudo).
+    local cask="" i rpkg=0 rootless=0 lastarg="" skipnext=0 sub=""
+    case "${1:-}" in
+        link|unlink) sub="$1" ;;
+    esac
     local -a MAP_ARGS=()
     for i in "$@"; do
         case "$i" in
-            --rpkg) rpkg=1 ;;
+            --rpkg|--rootless) rpkg=1 ;;
             --map) skipnext=1; MAP_ARGS+=("$i") ;;
             --map=*) MAP_ARGS+=("$i") ;;
             --cask) cask="next" ;;
@@ -1968,9 +2070,34 @@ cmd_brew() {
         esac
     done
     [ "$cask" = "next" ] && cask="$lastarg"   # `brew install X --cask`
+
+    if [ "$sub" = "link" ] || [ "$sub" = "unlink" ]; then
+        local cn="$cask" saw=0
+        if [ -z "$cn" ]; then
+            for i in "$@"; do
+                if [ "$saw" -eq 0 ]; then
+                    [ "$i" = "$sub" ] && { saw=1; continue; }
+                    continue
+                fi
+                case "$i" in
+                    --cask|--cask=*) continue ;;
+                    --*) continue ;;
+                    *) cn="$i"; break ;;
+                esac
+            done
+        fi
+        [ -n "$cn" ] || die "usage: repkger brew ${sub} <cask> | --cask <name>"
+        if [ "$sub" = "link" ]; then
+            cask_link_receipt "$cn"
+        else
+            cask_unlink_receipt "$cn"
+        fi
+        return 0
+    fi
+
     if [ -z "$cask" ]; then
         if [ "$rpkg" -eq 1 ]; then
-            die "--rpkg needs a cask: repkger brew install --cask --rpkg <name>"
+            die "--rootless needs a cask: repkger brew install --cask --rootless <name>"
         fi
         say "no --cask found; passing through to brew"
         exec brew "$@"
@@ -1995,7 +2122,7 @@ cmd_brew() {
     if [ "$is_pkg" -eq 0 ] && [ "$is_dmg" -eq 0 ] && [ "$is_zip" -eq 0 ]; then
         if [ "$rpkg" -eq 1 ]; then
             # forced mode must NEVER silently run brew's installer — fail loud
-            die "cask '$cask' artifact is not a .pkg/.mpkg/.dmg/.zip (url: ${url:-unknown}); --rpkg only handles pkg artifacts (incl. a .pkg inside a dmg/zip)"
+            die "cask '$cask' artifact is not a .pkg/.mpkg/.dmg/.zip (url: ${url:-unknown}); --rootless only handles pkg artifacts (incl. a .pkg inside a dmg/zip)"
         fi
         say "cask '$cask' does not install a .pkg (url: ${url:-unknown}) — passing through to brew"
         exec brew "$@"
@@ -2059,15 +2186,23 @@ cmd_brew() {
         fi
         if [ -z "$pkgfile" ]; then
             cask_cleanup
-            die "no .pkg/.mpkg found inside $urlbase — --rpkg needs a pkg artifact"
+            die "no .pkg/.mpkg found inside $urlbase — --rootless needs a pkg artifact"
         fi
         say "  inner pkg: $pkgfile"
     fi
 
     echo ""
-    "$0" install "$pkgfile" --home "$HOME" --yes ${MAP_ARGS[@]+"${MAP_ARGS[@]}"}
+    local rec logf
+    logf=$(mktemp "${TMPDIR:-/tmp}/repkger-brew.XXXXXX.log")
+    "$0" install "$pkgfile" --home "$HOME" --yes ${MAP_ARGS[@]+"${MAP_ARGS[@]}"} | tee "$logf"
+    rec=$(awk '/^Record: /{print $2; exit}' "$logf")
+    rm -f "$logf"
     cask_cleanup
     echo ""
+    if [ -n "$rec" ] && [ -d "$rec" ]; then
+        printf 'cask\t%s\n' "$cask" >> "$rec/record.tsv"
+        cask_link_receipt "$cask" "$rec"
+    fi
     say "Done. Cask's own uninstall/zap (from homebrew) for reference:"
     printf '%s' "$info" | python3 -c "
 import json,sys
@@ -2130,6 +2265,9 @@ cmd_self_install() {
     func_block=$(cat <<'FUNC'
 
 # >>> repkger >>>
+# put ~/bin (where 'repkger self-install' symlinks the CLI) on PATH so the
+# shim below can find `repkger`.
+export PATH="$HOME/bin:$PATH"
 # repkger brew wrapper — rootless .pkg installs for casks that ship a .pkg
 brewpkg() {
   if command -v repkger >/dev/null 2>&1; then
@@ -2139,32 +2277,60 @@ brewpkg() {
   fi
 }
 # use with e.g.:  brewpkg install --cask gamemaker
+#              or: brewpkg install --cask --rootless gamemaker
 
-# brew() shim: `brew install --cask --rpkg <name>` forces the rootless
-# repkger strategy for pkg casks (no installer, no sudo); every other brew
-# call passes straight through to the real brew.
+# rpkg() — friendly alias for the repkger CLI itself
+rpkg() { repkger "$@"; }
+# use with e.g.:  rpkg install ~/Downloads/GameMaker.pkg
+#              or: rpkg brew install --cask gamemaker
+
+# rbrew() — "rootless brew": force the repkger rootless strategy for any cask
+rbrew() { repkger brew --rootless "$@"; }
+# use with e.g.:  rbrew install --cask gamemaker   (die loudly if not a pkg)
+
+# brew() shim: `brew install --cask <name>` always routes through
+# repkger (rootless for pkg/dmg/zip casks; passes through for other
+# cask types). This is the DEFAULT — no flag needed. --rootless/--rpkg/-r
+# additionally FORCE rootless for ALL cask types (die loudly instead of
+# falling through to brew's installer, which needs sudo).
 brew() {
-  local a rpkg=0
+  local a rpkg=0 cask=0 install=0
   local -a args=()
   for a in "$@"; do
-    if [ "$a" = "--rpkg" ]; then
+    if [ "$a" = "--rpkg" ] || [ "$a" = "--rootless" ] || [ "$a" = "-r" ]; then
       rpkg=1
-    else
-      args+=("$a")
+    elif [ "$a" = "--cask" ] || [ "${a#--cask=}" != "$a" ]; then
+      cask=1
+    elif [ "$a" = "install" ]; then
+      install=1
     fi
+    args+=("$a")
   done
-  if [ "$rpkg" -eq 1 ]; then
+  # `brew install --cask <name>` always routes through repkger:
+  #   - pkg/dmg/zip casks install rootlessly (no sudo, no installer)
+  #   - other cask types pass through to real brew
+  # --rpkg/--rootless/-r additionally force rootless for ALL cask types
+  #   (die loudly instead of falling through to brew's installer)
+  if [ "$install" -eq 1 ] && [ "$cask" -eq 1 ]; then
     if command -v repkger >/dev/null 2>&1; then
       command repkger brew "${args[@]}"
     else
-      echo "brew: --rpkg needs repkger (see 'repkger self-install')" >&2
+      echo "brew: install --cask needs repkger (see 'repkger self-install')" >&2
+      return 1
+    fi
+  elif [ "$rpkg" -eq 1 ]; then
+    if command -v repkger >/dev/null 2>&1; then
+      command repkger brew "${args[@]}"
+    else
+      echo "brew: --rootless needs repkger (see 'repkger self-install')" >&2
       return 1
     fi
   else
-    command brew "$@"
+    command brew "${args[@]}"
   fi
 }
-# use with e.g.:  brew install --cask --rpkg gamemaker
+# use with e.g.:  brew install --cask gamemaker          # rootless (default)
+#              or: brew install --cask --rootless gamemaker
 # <<< repkger <<<
 FUNC
 )
@@ -2193,14 +2359,18 @@ EOF
     echo "=== repkger self-installed ==="
     echo "  CLI:      $link  (add $HOME/bin to your PATH if not already)"
     echo "  functions: brewpkg() + brew() shim in $shell_rc — open a new shell"
-    echo "             to use them (brew() only intercepts --rpkg, passes everything else through)"
+    echo "             to use them (brew() intercepts install --cask by default, --rootless forces rootless)"
     echo ""
     echo "Examples:"
     echo "  repkger inspect ~/Downloads/GameMaker-2024.14.4.222.pkg"
     echo "  repkger install ~/Downloads/GameMaker-2024.14.4.222.pkg"
-    echo "  brew install --cask --rpkg gamemaker   # force rootless pkg install"
-    echo "  brewpkg install --cask gamemaker       # same, without the brew() shim"
-    echo "  repkger uninstall com.yoyogames.gms2   # undo an install"
+    echo "  brew install --cask gamemaker           # rootless pkg install (DEFAULT)"
+    echo "  brew install --cask --rootless gamemaker # force rootless (die on non-pkg)"
+    echo "  brew install --cask -r gamemaker        # -r is an alias for --rootless"
+    echo "  rbrew install --cask gamemaker          # same as --rootless, standalone"
+    echo "  rpkg install ~/Downloads/GameMaker.pkg  # rpkg = alias for 'repkger'"
+    echo "  brewpkg install --cask gamemaker        # same, without the brew() shim"
+    echo "  repkger uninstall com.yoyogames.gms2    # undo an install"
 }
 
 # ---------------------------------------------------------------------------

@@ -65,6 +65,9 @@ Full procedure in `llms.md` → "Old v0.1.0 damage reversal". Also consider a
   `8cbd33a9a92ed60ebd53734413b33afdeb8c677326ada0c80971e9f91555cc7f`,
   livecheck `https://gms.yoyogames.com/update-mac.rss` (sparkle).
 - `repkger brew --cask <name>` wrapper already implemented in the CLI.
+  `brew install --cask <name>` now routes through repkger by default
+  (the `brew()` shim intercepts `install --cask`); `--rootless`
+  alias for `--rpkg` additionally dies on non-pkg artifacts.
 
 ## 5. First publish — ✅ DONE manually via gh CLI (2026-08-15)
 - ~~Commit everything~~ — DONE. The CI pipeline is **blocked by GitHub account

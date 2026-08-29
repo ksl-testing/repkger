@@ -68,14 +68,20 @@
   (no --map) → 55,077 files, 201 stale refs rewritten → launched headless
   once → uninstall reversed everything. See README "Validated" + HANDOFF
   2026-08-18. `test/roundtrip.sh` 45/45.
-- **New in v0.3.0**: `bom-redo`; bundle-.mpkg expansion; `*.pkg.tmp`
-  component discovery; Distribution-version fallback (Unity stamps PackageInfo
-  version `0`); map_path never re-maps under-home paths; sha256 for dir pkgs;
-  top-level symlink preservation in merge (ditto dereferences them);
-  `--rpkg` brew force flag + `brew()` shim (no silent installer); `--rpkg`
-  handles dmg/zip casks with an inner pkg (mount/unzip → rootless install →
-  cleanup); GUI `choose from list` chooser (fixed 4-button -50 bug) + cask
-  install mode + headless `--cask`.
+- **New in v0.3.0**: `bom-redo`; bundle-.mpkg expansion;
+  `*.pkg.tmp` component discovery; Distribution-version fallback
+  (Unity stamps PackageInfo version `0`); map_path never re-maps
+  under-home paths; sha256 for dir pkgs; top-level symlink
+  preservation in merge (ditto dereferences them); `--rpkg` brew
+  force flag + `brew()` shim (no silent installer); `--rpkg` handles
+  dmg/zip casks with an inner pkg (mount/unzip → rootless install →
+  cleanup); GUI `choose from list` chooser (fixed 4-button -50 bug) +
+  cask install mode + headless `--cask`.
+- **New in v0.5.1+**: `brew install --cask <name>` always routes
+  through repkger rootlessly (the `brew()` shim intercepts
+  `install --cask` by default; `--rootless` alias for `--rpkg`
+  additionally dies on non-pkg artifacts). `--rootless` works as an
+  alias for `--rpkg` everywhere. Roundtrip **112/112**.
 - **New in v0.4.0**: Predictive BOM (`--preview`/`--list-only` on
   `bom-redo`); targeted multi-level extraction (`--only PREFIX` on `bom-redo`
   + `install`); embedded pre/post-install script adjustment to match the

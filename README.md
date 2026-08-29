@@ -12,24 +12,36 @@ Gatekeeper won't flag the freshly installed apps.
 
 ## Install
 
-```bash
-brew install ksl-testing/tap/repkger        # CLI (Homebrew formula in ksl-testing/homebrew-tap)
-```
+Pick whichever fits how you'll use repkger:
+
+| You want…                              | Install with…                                                                 |
+|----------------------------------------|-------------------------------------------------------------------------------|
+| The **CLI** on PATH (terminal)         | `brew install ksl-testing/tap/repkger`  (formula)                            |
+| The **GUI app** (drag-drop)            | `brew install --cask ksl-testing/tap/repkger`  (cask) — or download `Repkger-<v>.app.zip` |
+| No Homebrew at all                     | download `repkger-<v>.zip` (CLI) or `repkger` (raw script) → drop on PATH    |
+| Part of the Noren/tpl-bootkit suite    | `./bin/private-casks.sh install repkger`  (resolves the latest release)      |
+| Auto rootless `brew install --cask`    | `repkger self-install`  (adds `brew()`/`brewpkg()`/`rbrew()`/`rpkg()` shims) |
+
+The tap publishes both `Formula/repkger.rb` (CLI) and `Casks/repkger.rb` (GUI app)
+into `ksl-testing/homebrew-tap`, so the two `brew install` lines above always
+track the latest release. Both assets are public, so brew's own downloader works
+(no GitHub auth needed) — unlike the tpl-bootkit private casks. The cask's
+`postflight` also symlinks the embedded CLI to `$(brew --prefix)/bin/repkger`,
+so `repkger` is on PATH even from a GUI-only install.
 
 Or grab an asset from the [GitHub releases page](https://github.com/ksl-testing/repkger/releases):
 
 - `Repkger-<version>.app.zip` — the GUI app, drag to /Applications (ad-hoc signed)
-- `repkger-<version>.zip` — the CLI (this is what brew installs)
+- `repkger-<version>.zip` — the CLI (this is what the formula installs)
 - `repkger` — the raw script, just drop it on your PATH
 - `SHA256SUMS.txt` — checksums for the above
 
 **How the pipeline works:** every push to `main` that touches repkger sources
 runs the test suite (fixture round-trip + GUI build) on macOS, then publishes a
 GitHub release tagged `v<REPKGER_VERSION>` with those assets, and refreshes the
-`ksl-testing/homebrew-tap` formula (`Formula/repkger.rb`) so `brew install
-ksl-testing/tap/repkger` always gets the latest build. Run it manually any time
-from anywhere: `gh workflow run build-release.yml` (or the repo's Actions tab
-on the web / mobile app).
+`ksl-testing/homebrew-tap` formula + cask (`Formula/repkger.rb`,
+`Casks/repkger.rb`) so `brew install ksl-testing/tap/repkger` and
+`brew install --cask ksl-testing/tap/repkger` always get the latest build.
 
 ## Quick start (CLI)
 
@@ -47,10 +59,11 @@ bin/repkger bom-redo ~/Downloads/GameMaker-2026.0.0.16.pkg --only /Applications 
 bin/repkger install  ~/Downloads/GameMaker-2026.0.0.16.pkg --only /Applications   # targeted direct extraction
 bin/repkger list                                                # installed records
 bin/repkger uninstall com.yoyogames.gms2 --yes                  # reverse an install
-bin/repkger brew --cask gamemaker                               # rootless install of a pkg-style cask
-brew install --cask --rpkg gamemaker                            # same, with the brew() shim alias
-bin/repkger gui                                                 # open the Repkger.app GUI
-bin/repkger self-install                                        # symlink into ~/bin + brewpkg() in ~/.zshrc
+ bin/repkger brew --cask gamemaker                               # rootless install of a pkg-style cask
+ brew install --cask gamemaker                                 # same, with the brew() shim (auto rootless)
+ repkger brew link gamemaker                                   # make it appear in `brew list --cask`
+bin/repkger gui                                                 # open the Repkger.app GUI (Python/Tk)
+bin/repkger self-install                                        # ~/bin symlink + brew()/brewpkg()/rbrew()/rpkg() shims
 ```
 
 ## Build it yourself
@@ -68,39 +81,36 @@ script (macOS bash 3.2 compatible). Drop it on your `PATH` (or
 
 ### The GUI app (`Repkger.app`)
 
+The GUI is a real windowed front-end (Python/Tk), **not** the old AppleScript
+droplet — the droplet mishandled launch/droplet `argv` and errored on open. The
+Python app gets clean `argv`, so double-click, Finder drag-drop onto the icon,
+and "Open With" all work.
+
 ```bash
-scripts/make-app.sh                       # -> build/Repkger.app
-open -a build/Repkger.app                 # mode chooser (see below)
-open -a build/Repkger.app some.pkg        # or drop .pkg files on the app icon
-osascript build/Repkger.app --cask gamemaker   # headless: rootless cask install (--rpkg)
+scripts/make-gui-app.sh                       # -> build/Repkger.app
+open -a build/Repkger.app                     # windowed mode chooser
+open -a build/Repkger.app some.pkg            # pre-loads the dropped pkg(s)
+python3 gui/repkger_gui.py --smoketest x.pkg  # headless: prints the repkger command it would run
 ```
 
-The app is self-contained (the CLI lives inside the bundle) and portable —
-drag it anywhere, even off a USB stick. It processes packages **independently**:
-drop several `.pkg` files on the icon, or open the app and pick one or many
-files (Cmd-click to multi-select in the open dialog) — each one is inspected
-or installed on its own, with `(1 of N)` progress notifications, and a failure
-on one doesn't stop the rest. The mode chooser is a list: install a `.pkg`,
-inspect a `.pkg`, uninstall an installed one, or **install a brew cask
-rootlessly** (prompts for the cask name and runs `repkger brew install --cask
---rpkg <name>` — never brew's pkg installer, no sudo). Headless:
-`--install <pkg> [--home dir] [--data dir]`, `--inspect <pkg>`, and
-`--cask <name> [--data dir]`.
+The app is self-contained: `Contents/MacOS/repkger-gui` (the Python GUI) plus
+`Contents/Resources/repkger` (the embedded CLI), so it runs without repkger on
+PATH. Modes in the chooser: **install** a `.pkg`/`.mpkg`/`.dmg`/`.zip`/`.bundle`,
+**inspect** (file list + where each file lands), **bom-redo** (predictive BOM +
+rewrite plan, preview), **brew cask** (rootless install of `--cask <name>`), and
+**uninstall** a recorded install. There's a Finder file-chooser, a target-dir
+picker, and options for `--run-scripts`, `--home-rooted`, and `--only <prefix>`.
+The bundle registers `.pkg`/`.mpkg`/`.dmg`/`.zip`/`.bundle` as document types, is
+ad-hoc signed, and the quarantine is cleared on build.
 
-`make-app.sh` does the whole assembly:
+`make-gui-app.sh` assembles it: writes `Contents/Info.plist`
+(`CFBundleExecutable` = `repkger-gui`, document types), copies in the CLI + GUI,
+`codesign -s -`, strips `com.apple.quarantine`, and `lsregister`s it.
 
-1. `osacompile`s the droplet source `gui/Repkger.applescript` into
-   `build/Repkger.app`;
-2. embeds `bin/repkger` into `Contents/Resources/repkger` so the app works
-   without repkger on PATH;
-3. stamps the bundle id `com.ksl-testing.repkger` + version (read from
-   `bin/repkger`'s `REPKGER_VERSION`) and registers `.pkg`/`.mpkg` as
-   document types via `PlistBuddy`;
-4. ad-hoc signs the bundle (`codesign -s -`).
-
-Drop `gui/Repkger.icns` into the repo to give the app a custom icon (it's
-picked up automatically). The result is a standard macOS bundle — drag it to
-`/Applications`, zip it, or run it straight from `build/`.
+Drop `gui/NorenHodoki.icns` into the repo for a custom icon (used when
+`APP_NAME="Noren Hodoki" scripts/make-gui-app.sh`). The AppleScript droplet
+source `gui/Repkger.applescript` and `scripts/make-app.sh` are kept for the
+Noren Suite build below.
 
 ### Noren Hodoki (Noren Suite plugin build)
 
@@ -136,7 +146,7 @@ See tpl-bootkit `branding/HODOKI_BRIEF.md` for full brand identity.
 
 ```bash
 test/make-fixture.sh                       # builds a tiny mini.pkg (no downloads)
-bash test/roundtrip.sh                     # 51 checks: install -> uninstall round-trip + bom-redo + --rpkg
+bash test/roundtrip.sh                     # 112 checks: install -> uninstall round-trip + bom-redo + --rootless
 ```
 
 ### Building the distributable artifacts
@@ -272,30 +282,45 @@ REPKGER_DATA=/tmp/rk-data bin/repkger uninstall com.test.miniapp --yes
 find /tmp/rk-home | wc -l                  # expect 1
 ```
 
-## Forcing rootless extraction for pkg casks (`brew … --rpkg`)
+## Rootless cask installs (`brew install --cask`)
 
 Casks whose downloaded artifact is a `.pkg` normally install via brew's `pkg`
 DSL, which runs `installer` and prompts for an admin password. repkger's brew
-wrapper intercepts those automatically; add **`--rpkg`** to make that the
-*only* behavior for a cask — it never falls through to brew's installer and
-errors out (instead of silently running it) if the artifact isn't a `.pkg`.
-`--rpkg` also handles **dmg/zip casks that contain a `.pkg`/`.mpkg` inside**:
-the archive is downloaded + hash-verified, mounted (`hdiutil attach -readonly`)
-or unzipped, the inner package is installed rootlessly, and the mount/extract
-dir is cleaned up (no leftover volumes). Any other artifact type — or a
-container with no `.pkg` inside — fails loudly:
+wrapper intercepts those automatically — **`brew install --cask <name>` always
+installs pkg/dmg/zip casks rootlessly** (no `--rpkg` needed). Add
+**`--rootless`** (alias `--rpkg`, or `-r`) to make that the *only* behavior for a
+cask — it never falls through to brew's installer and errors out (instead of
+silently running it) if the artifact isn't a `.pkg`. `--rootless` also handles
+**dmg/zip casks that contain a `.pkg`/`.mpkg` inside**: the archive is downloaded
++ hash-verified, mounted (`hdiutil attach -readonly`) or unzipped, the inner
+package is installed rootlessly, and the mount/extract dir is cleaned up. Any
+other artifact type — or a container with no `.pkg` inside — fails loudly:
 
 ```bash
-repkger self-install                 # installs the brew() shim into ~/.zshrc
-brew install --cask --rpkg gamemaker # -> rootless repkger install, no sudo
-# without the shim, the same thing works as:
-repkger brew install --cask --rpkg gamemaker
-# or the pre-existing wrapper:
-brewpkg install --cask gamemaker
+repkger self-install                 # symlink into ~/bin + brew()/brewpkg()/rbrew()/rpkg() shims in ~/.zshrc
+brew install --cask gamemaker        # -> rootless repkger install, no sudo (DEFAULT)
+repkger brew install --cask gamemaker
+brew install --cask --rootless gamemaker     # -r is a shorthand for --rootless
+repkger brew install --cask --rootless gamemaker
+brewpkg install --cask gamemaker             # the pre-existing wrapper (no brew() shim)
+rbrew install --cask gamemaker               # = repkger brew --rootless (standalone)
+rpkg install ~/Downloads/Foo.pkg             # = repkger (standalone CLI alias)
 ```
 
-The `brew()` shim passes every other `brew` call straight through to the real
-Homebrew — it only intercepts invocations that contain `--rpkg`.
+The `brew()` shim (added by `repkger self-install`) routes `brew install --cask
+<name>` through repkger by default and passes every other `brew` call straight
+through to the real Homebrew. `-r`/`--rootless`/`--rpkg` are the force flags.
+
+### Showing rootless casks in `brew list`
+
+A rootless install doesn't write a Homebrew receipt, so `brew list` won't know
+about it. `repkger brew link <cask>` writes a Caskroom receipt
+(`~/homebrew/Caskroom/<cask>/<ver>/<app>.app` symlink + `.metadata/
+INSTALL_RECEIPT.json`) so the install shows up under `brew list --cask <cask>`
+and `brew info --cask <cask>` — handy for tracking what you installed rootlessly.
+`repkger brew install --cask <name>` links automatically; `repkger brew link` /
+`repkger brew unlink <cask>` manage it by hand. This never invokes brew's
+installer — it only symlinks the already-installed app into the Caskroom.
 
 ## FamiStudio cask (ksl-testing/tap) — integration showcase
 

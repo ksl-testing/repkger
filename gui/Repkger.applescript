@@ -6,7 +6,7 @@
 -- Also usable headless (for automation / testing):
 --   Repkger.app --install <pkg> [--home <dir>] [--data <dir>]
 --   Repkger.app --inspect <pkg>
---   Repkger.app --cask <name> [--data <dir>]   (brew cask rootless install, --rpkg)
+--   Repkger.app --cask <name> [--data <dir>]   (brew cask rootless install, --rootless)
 
 property cliName : "repkger"
 
@@ -110,7 +110,7 @@ end handleDrops
 on modeChooser()
     -- NOTE: display dialog allows at most 3 buttons, so use a list for the
     -- 4+ modes (a 4-button dialog fails at runtime with -50).
-    set options to {"Install a .pkg into your home directory", "Inspect a .pkg", "Uninstall an installed .pkg", "Install a brew cask (--rpkg, rootless)"}
+    set options to {"Install a .pkg into your home directory", "Inspect a .pkg", "Uninstall an installed .pkg", "Install a brew cask (--rootless, rootless)"}
     set pick to choose from list options with title "Repkger" with prompt "Repkger — rootless macOS .pkg installer (no admin, no sudo)." & linefeed & "Drop .pkg files on the app icon anytime." default items {item 1 of options} OK button name "Continue" cancel button name "Cancel"
     if pick is false then return
     set c to item 1 of pick
@@ -213,7 +213,7 @@ end doInstall
 -- never brew's pkg installer / sudo)
 on doCaskPrompt()
     try
-        set caskName to text returned of (display dialog "Install a brew cask whose artifact is a .pkg — rootlessly, no installer, no sudo (repkger brew install --cask --rpkg <name>):" default answer "" buttons {"Cancel", "Install Cask"} default button "Install Cask" with title "Repkger — cask (--rpkg)" with icon note)
+        set caskName to text returned of (display dialog "Install a brew cask whose artifact is a .pkg — rootlessly, no installer, no sudo (repkger brew install --cask --rootless <name>):" default answer "" buttons {"Cancel", "Install Cask"} default button "Install Cask" with title "Repkger — cask (--rootless)" with icon note)
     on error
         return
     end try
@@ -224,13 +224,13 @@ on doCaskInstall(caskName, dataDir)
     set cli to my cliPath()
     set envPrefix to ""
     if dataDir is not "" then set envPrefix to "REPKGER_DATA=" & quoted form of dataDir & " "
-    set cmd to envPrefix & quoted form of cli & " brew install --cask --rpkg " & quoted form of caskName
-    display notification "Installing cask " & caskName & " — rootless (--rpkg), no sudo" with title "Repkger"
+    set cmd to envPrefix & quoted form of cli & " brew install --cask --rootless " & quoted form of caskName
+    display notification "Installing cask " & caskName & " — rootless (--rootless), no sudo" with title "Repkger"
     try
         with timeout of 3600 seconds
             do shell script cmd
         end timeout
-        display notification "Installed cask " & caskName & " rootlessly (--rpkg)" with title "Repkger"
+        display notification "Installed cask " & caskName & " rootlessly (--rootless)" with title "Repkger"
     on error errMsg
         display dialog "Cask install failed:" & linefeed & caskName & linefeed & linefeed & errMsg buttons {"OK"} default button "OK" with title "Repkger" with icon stop
     end try

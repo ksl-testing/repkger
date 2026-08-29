@@ -16,8 +16,9 @@ It also inspects `.pkg` files the way *Suspicious Package* does (components, BOM
 file lists, scripts, versions) — including a `--files` view of where each BOM
 entry will land after re-mapping. A `brew` wrapper intercepts
 `brew install --cask <name>` for casks that ship a `.pkg` (e.g. `gamemaker`)
-and installs them rootlessly. A GUI droplet app (`build/Repkger.app`) wraps the
-inspect + install + uninstall flows.
+and installs them rootlessly, and links them into Homebrew's Caskroom so they
+show under `brew list --cask`. A GUI app (`build/Repkger.app`, Python/Tk)
+wraps the inspect + install + bom-redo + brew + uninstall flows.
 
 Origin: generalization of the CSP_Mac project's `install_portable.sh`
 (`~/Documents/GitHub/CSP_Mac`), which did the same thing for one specific pkg.
@@ -26,8 +27,10 @@ Origin: generalization of the CSP_Mac project's `install_portable.sh`
 
 ```
 bin/repkger             # the whole CLI — single bash script (macOS bash 3.2 compatible)
-gui/Repkger.applescript # the GUI droplet source (osacompile target)
-scripts/make-app.sh     # builds build/Repkger.app from the droplet + CLI + metadata
+gui/repkger_gui.py     # the GUI front-end (Python/Tk) — real windowed app
+scripts/make-gui-app.sh # builds build/Repkger.app (Python/Tk GUI + embedded CLI)
+gui/Repkger.applescript # the GUI droplet source (osacompile target) — Noren Suite build only
+scripts/make-app.sh     # builds the Noren Suite droplet app from the source above
 test/make-fixture.sh    # builds a tiny synthetic mini.pkg for the fast test loop
 README.md               # overview + quick start
 llms.md                 # THIS FILE — handoff
@@ -57,20 +60,22 @@ NOTES.md                # dev notes: architecture, validated behavior, gotchas
   each target's parent dir so future copies don't re-inherit); if `-d` fails
   while the attr is present it falls back to clearing all xattrs (`-c`/`-cr`).
   Never walks `/` or `$HOME_ROOT` recursively.
-- **GUI `Repkger.app` exists** (`build/Repkger.app`): droplet with
-  `on open droppedItems`, mode chooser (Inspect / Install / Uninstall),
-  Suspicious-Package-style inspect dialog with "Full Report" + "Install"
-  buttons, headless `--install <pkg> [--home dir] [--data dir]` /
-  `--inspect <pkg>` modes, embedded CLI in `Contents/Resources/repkger`,
-  bundle id `com.ksl-testing.repkger`, `.pkg`/`.mpkg` doc types, ad-hoc
-  signed. `repkger gui` finds it in `build/`, repo root, `~/Applications`,
-  or `/Applications`.
-- **GUI multi-select (2026-08-13)**: open dialog accepts multiple .pkg files
-  (`choosePkgs`, `multiple selections allowed true`); mode chooser and
-  drag-drop process each file independently in a loop with per-file
-  `(i of n)` progress notifications; failures don't stop the batch.
-  `make-app.sh` derives the version from `bin/repkger`'s `REPKGER_VERSION`
-  instead of hardcoding.
+- **GUI `Repkger.app` is a real Python/Tk app** (`build/Repkger.app`), built by
+  `scripts/make-gui-app.sh` from `gui/repkger_gui.py`. Modes: install / inspect /
+  bom-redo / brew cask / uninstall, with a Finder file-chooser, target-dir
+  picker, and `--run-scripts` / `--home-rooted` / `--only` options. Double-click,
+  Finder drag-drop onto the icon, and "Open With" all work (clean argv — the
+  old AppleScript droplet got `{"current application"}` on launch and errored).
+  The bundle embeds the CLI at `Contents/Resources/repkger`, registers
+  `.pkg`/`.mpkg`/`.dmg`/`.zip`/`.bundle` doc types, is ad-hoc signed, and the
+  quarantine is cleared on build. `repkger gui` finds it in `build/`, repo root,
+  `~/Applications`, or `/Applications`. `python3 gui/repkger_gui.py --smoketest
+  <pkg>` prints the repkger command it would run (headless validation). The
+  AppleScript droplet (`gui/Repkger.applescript` + `scripts/make-app.sh`) is kept
+  only for the Noren Suite build.
+- **GUI multi-select**: the Tk open dialog accepts multiple `.pkg` files; each
+  is processed independently. `make-gui-app.sh` derives the version from
+  `bin/repkger`'s `REPKGER_VERSION`.
 - Fixed pre-existing bugs found along the way: single-component packages that
   expand with `PackageInfo` at the root (component_dirs now checks the root),
   `//` double-slash paths when install-location is `/` (which also broke
@@ -103,12 +108,13 @@ REPKGER_DATA=/tmp/rk-data $R list
 REPKGER_DATA=/tmp/rk-data $R uninstall com.test.miniapp --yes
 find /tmp/rk-home | wc -l                  # expect 1 (only the root)
 
-# GUI headless flow (no dialogs) — osascript ONLY:
+# GUI headless flow — Python/Tk GUI (preferred):
+python3 gui/repkger_gui.py --smoketest /tmp/repkger-fixture/mini.pkg   # prints the repkger cmd it would run
+scripts/make-gui-app.sh                  # rebuild build/Repkger.app (Python/Tk)
+# Legacy AppleScript droplet (Noren Suite build only) — headless via osascript:
 PATH="$PWD/bin:$PATH" osascript gui/Repkger.applescript --install /tmp/repkger-fixture/mini.pkg --home /tmp/rk-home --data /tmp/rk-data
-osascript build/Repkger.app --install /tmp/repkger-fixture/mini.pkg --home /tmp/rk-home --data /tmp/rk-data   # uses embedded CLI
-scripts/make-app.sh                        # rebuild build/Repkger.app
-# NOTE: droplets ignore argv when run directly (MacOS/droplet --install …) or
-# via `open --args` — always drive headless tests through `osascript`, and
+# NOTE: the droplet ignores argv when run directly (MacOS/droplet --install …) or
+# via `open --args` — drive headless tests through `osascript`, and
 # pkill -f MacOS/droplet first (a stale instance swallows Apple events).
 ```
 
@@ -151,7 +157,9 @@ scripts/make-app.sh                        # rebuild build/Repkger.app
   nothing → falls into the mode-chooser dialog and hangs) and via
   `open --args`; headless automation must use `osascript <app-or-source>`.
   A stale running droplet intercepts Apple events and hangs new osascript
-  calls — `pkill -f MacOS/droplet` first.
+  calls — `pkill -f MacOS/droplet` first. **This is why the main GUI is now a
+  Python/Tk app** (`gui/repkger_gui.py` built by `scripts/make-gui-app.sh`) —
+  it gets clean argv, so double-click / drag-drop / "Open With" all work.
 - **AppleScript handlers have NO optional parameters** — adding a param to
   `doInstall` broke every 3-arg call site with `-1721`; grep for all callers
   after changing arity.
