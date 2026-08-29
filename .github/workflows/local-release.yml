@@ -1,0 +1,54 @@
+name: local-release
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DISABLED LOCAL-RUNNER RELEASE WORKFLOW   (placeholder, consumes NO Actions
+# quota)
+#
+# GH is billing-blocked on this account, so this repo releases from a LOCAL
+# machine / self-hosted runner instead of GitHub-hosted runners. Everything
+# below is INACTIVE ON PURPOSE:
+#
+#   • `runs-on: [self-hosted, macOS]` — no GitHub-hosted quota involved.
+#   • The `schedule`/`push`/`pull_request` triggers are COMMENTED OUT so the
+#     workflow can never start by itself. It is manually dispatched only, and
+#     only runs if you also have a self-hosted runner registered for this
+#     repo. Without a runner it silently does nothing.
+#   • The real work lives in scripts/local-release.sh, which you can also run
+#     straight from a shell (no Actions at all).
+#
+# To USE this (optional): register a self-hosted macOS runner, uncomment the
+# trigger below (or keep it manual), and push. The script publishes the
+# release + refreshes the ksl-testing/homebrew-tap formula in parity.
+#
+#   gh workflow run local-release.yml -f mode=publish
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  # schedule:
+  #   # every Friday 03:30 local — COMMENTED OUT: keep this file silent
+  #   - cron: '30 3 * * 5'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'publish | build-only | dry-run'
+        required: false
+        default: 'dry-run'
+
+jobs:
+  release:
+    name: local-release
+    # LOCAL runner only — never a GitHub-hosted runner (no Actions quota)
+    runs-on: [ self-hosted, macOS ]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build + publish (local runner)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          bash scripts/local-release.sh "${MODE:-dry-run}"
