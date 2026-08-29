@@ -24,10 +24,13 @@ Pick whichever fits how you'll use repkger:
 
 The tap publishes both `Formula/repkger.rb` (CLI) and `Casks/repkger.rb` (GUI app)
 into `ksl-testing/homebrew-tap`, so the two `brew install` lines above always
-track the latest release. Both assets are public, so brew's own downloader works
-(no GitHub auth needed) — unlike the tpl-bootkit private casks. The cask's
-`postflight` also symlinks the embedded CLI to `$(brew --prefix)/bin/repkger`,
-so `repkger` is on PATH even from a GUI-only install.
+track the latest release. The `repkger` repo is **public**, so brew's own
+downloader fetches the assets without GitHub auth — unlike the tpl-bootkit
+private casks. The cask's `binary` stanza symlinks the embedded CLI to
+`$(brew --prefix)/bin/repkger`, so `repkger` is on PATH even from a GUI-only
+install. Install the **cask** for GUI + CLI, or the **formula** for CLI-only —
+both place `repkger` on PATH, so use one or the other (they'd otherwise conflict
+on the same `bin/repkger`).
 
 Or grab an asset from the [GitHub releases page](https://github.com/ksl-testing/repkger/releases):
 
@@ -36,12 +39,15 @@ Or grab an asset from the [GitHub releases page](https://github.com/ksl-testing/
 - `repkger` — the raw script, just drop it on your PATH
 - `SHA256SUMS.txt` — checksums for the above
 
-**How the pipeline works:** every push to `main` that touches repkger sources
-runs the test suite (fixture round-trip + GUI build) on macOS, then publishes a
-GitHub release tagged `v<REPKGER_VERSION>` with those assets, and refreshes the
+**How the pipeline works:** releases are built and published **locally** with
+`scripts/release.sh` (zero GitHub Actions quota) — it runs `test/roundtrip.sh`,
+builds `build/Repkger.app`, zips the dist assets, and `gh release create`s
+`v<REPKGER_VERSION>` with them; `scripts/update-tap.sh` then refreshes the
 `ksl-testing/homebrew-tap` formula + cask (`Formula/repkger.rb`,
 `Casks/repkger.rb`) so `brew install ksl-testing/tap/repkger` and
-`brew install --cask ksl-testing/tap/repkger` always get the latest build.
+`brew install --cask ksl-testing/tap/repkger` always track the latest build.
+(The `repkger` repo is public, so brew's own downloader fetches the assets
+without GitHub auth.)
 
 ## Quick start (CLI)
 
@@ -200,6 +206,22 @@ and posts a notification when done. The CLI is embedded in the app bundle
     uninstall; `_CodeSignature` artifacts from ad-hoc re-signing are recorded
     so uninstall reverses everything.
 - Dry-run (`--list-only`) shows the exact mapping without touching anything.
+
+### repkger itself (v0.5.2)
+
+Distributed three ways, all validated against GameMaker 2024.14.4.222 as the
+test pkg:
+
+- **Homebrew formula** `ksl-testing/tap/repkger` — installs the CLI (`repkger`).
+- **Homebrew cask** `ksl-testing/tap/repkger` — installs `Repkger.app` (Python/Tk
+  GUI) and symlinks the embedded CLI to `$(brew --prefix)/bin/repkger`.
+- **GitHub release assets** — `Repkger-<v>.app.zip` (GUI), `repkger-<v>.zip`
+  (CLI), raw `repkger`, and `SHA256SUMS.txt`.
+
+The GUI is the **Python/Tk app** (`gui/repkger_gui.py`, built by
+`scripts/make-gui-app.sh`) — the old AppleScript droplet is retired (it
+mishandled launch/droplet `argv`). `brew list --cask repkger` reports the
+GUI install (via the cask's Caskroom receipt). The `repkger` repo is public.
 
 ## Design
 

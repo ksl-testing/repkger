@@ -1,4 +1,37 @@
-# STATUS — 2026-08-19 (v0.4.0)
+# STATUS — 2026-08-29 (v0.5.2)
+
+## v0.5.2 — what shipped (2026-08-29)
+- **GUI is Python/Tk** (`gui/repkger_gui.py`), built by `scripts/make-gui-app.sh`
+  into `build/Repkger.app`. Replaces the old AppleScript droplet (which errored
+  on launch/droplet `argv`). Double-click, Finder drag-drop, and "Open With"
+  all work; drag-dropped `.pkg`/`.dmg`/`.zip`/`.bundle` pre-loads the file list.
+  ⚠️ The actual Tk window has only been validated headlessly (construction +
+  `--smoketest` wiring); a live graphical launch hasn't been confirmed in this
+  environment (no WindowServer).
+- **`brew link` / `brew unlink`** for casks writes/removes a Caskroom receipt so
+  rootless installs show under `brew list --cask <name>` (validated with
+  `gamemaker`).
+- **Homebrew tap formula + cask published** to `ksl-testing/homebrew-tap`:
+  `Formula/repkger.rb` (CLI), `Formula/repkgr.rb` (alias), `Casks/repkger.rb`
+  (GUI). The cask uses a `binary` stanza (NOT `postflight`+`Symlink.new`, which
+  errors in the cask loader) to symlink the embedded CLI into
+  `$(brew --prefix)/bin/repkger`. Both install cleanly (verified on this box).
+- **`repkger` repo is now PUBLIC** — brew downloads release assets anonymously,
+  so the formula/cask work for anyone. `tpl-bootkit` private-casks still uses a
+  `gh`-authed `repkger` fallback for private/distro needs.
+- **`self-install`** links `~/bin/repkger` + adds `brew()`/`brewpkg()`/`rbrew()`
+  /`rpkg()` shims and puts `~/bin` on PATH (verified in a fresh login shell).
+- Roundtrip **112/112**; released via `scripts/release.sh` + `scripts/update-tap.sh`
+  (zero GitHub Actions quota).
+
+## Outstanding (v0.5.2)
+- **GUI live window launch** not yet confirmed on a real graphical session
+  (headless validation only). The `open build/Repkger.app` path should be
+  smoke-tested on a desktop once available.
+- Historical v0.1.0 `~/Applications` damage on this machine still not reversed
+  (tool can no longer cause it).
+- Noren Hodoki plugin build is still the AppleScript droplet path (GUI Python/Tk
+  not yet wired for the Hodoki brand).
 
 ## Done & validated
 - CLI commands: `inspect` (+ `--json`, `--show-scripts`, `--files [N]`),
@@ -98,27 +131,26 @@
 - Tap casks: the `famistudio` cask is DONE and live at **4.5.3** (rootless
   .NET cask with apphost menu-name fix, de-quarantine self-heal,
   settings/autosave symlinks, weekly Monday livecheck — upgrade verified:
-  settings ini byte-identical after `brew upgrade --cask famistudio`). Still open:
-  `Casks/repkger.rb` (GUI) + rootless `Casks/gamemaker.rb`.
+  settings ini byte-identical after `brew upgrade --cask famistudio`). The
+  `Casks/repkger.rb` GUI cask is now DONE + live (v0.5.2). A dedicated
+  `Casks/gamemaker.rb` is still a future idea; today `repkger brew install
+  --cask gamemaker` handles GameMaker rootlessly inline.
 
 ## Release pipeline
-- `.github/workflows/release.yml`: push to `main` (paths: bin/gui/scripts/
-  tap/test/workflow) or `workflow_dispatch` → test (fixture round-trip 82
-  checks + GUI smoke) → build (`make-app.sh`, CLI zip, app zip, SHA256SUMS)
-  → publish/refresh release `v<REPKGER_VERSION>` with assets →
-  `scripts/update-tap.sh` updates `ksl-testing/homebrew-tap`. Manual
-  re-trigger: `gh workflow run build-release.yml` (works from mobile).
-- `scripts/update-tap.sh` renders `tap/repkgr.rb` (+ `repkger.rb` alias) with
-  the release URL + sha256, clones or creates the tap repo, commits, pushes.
-- **Env-var build** (`scripts/make-app.sh`): APP_NAME, DISPLAY_NAME,
-  BUNDLE_ID, INSTALL_DIR — no script edits needed. Primary build:
-  `APP_NAME=tpl-unwrapper` at `~/applications/`. Plugin build:
-  `APP_NAME="Noren Hodoki"` at `~/applications/noren/`. After install,
-  `lsregister -f` clears cached Gatekeeper rejections.
-- ⚠️ CI blocked by GitHub account billing (runs don't start) — v0.2.0 and
-  v0.3.0 published manually via `gh release create`. v0.4.0 pending commit.
-  `scripts/release-gh.sh` is a non-working placeholder for future automation.
-  Tap formula still needs a `TAP_TOKEN` PAT.
+- `scripts/release.sh` (local, **zero GitHub Actions quota**): runs
+  `test/roundtrip.sh`, builds `build/Repkger.app` via `scripts/make-gui-app.sh`,
+  zips `Repkger-<v>.app.zip` + `repkger-<v>.zip` + raw `repkger` +
+  `SHA256SUMS.txt` into `dist/`, then `gh release create v<REPKGER_VERSION>`
+  uploads those assets.
+- `scripts/update-tap.sh` renders `tap/repkgr.rb` (+ `repkger.rb` alias) and
+  `tap/Casks/repkger.rb` with the release URL + sha256, clones or creates
+  `ksl-testing/homebrew-tap`, commits, and pushes. Run with
+  `TAP_TOKEN=$(gh auth token) VERSION=… CLI_SHA256=… APP_SHA256=…`.
+- `.github/workflows/release.yml` is kept for reference but not used (billing).
+- **Env-var build** (`scripts/make-gui-app.sh`): APP_NAME, DISPLAY_NAME,
+  BUNDLE_ID, INSTALL_DIR — no script edits needed.
+- The `repkger` repo is **public**, so the formula/cask fetch assets without
+  GitHub auth.
 
 ## Housekeeping notes
 - `test/make-fixture.sh` builds the fast fixture (`/tmp/repkger-fixture/mini.pkg`);

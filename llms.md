@@ -1,6 +1,6 @@
 # repkger — LLM handoff doc (read this first)
 
-> Written 2026-08-10, updated 2026-08-11 (v0.2.0). Purpose: let a **cacheless
+> Written 2026-08-10, updated 2026-08-29 (v0.5.2). Purpose: let a **cacheless
 > LLM** (or a human) pick up this project in ≤5 minutes. Everything below is
 > the current truth; re-read files before editing (they may have changed).
 
@@ -39,7 +39,27 @@ llms/ROADMAP.md         # GUI .app, brew integration, tap integration
 NOTES.md                # dev notes: architecture, validated behavior, gotchas
 ```
 
-## Status (2026-08-11, v0.2.0)
+## Status (2026-08-29, v0.5.2)
+
+### New in v0.5.2
+- **GUI is Python/Tk** (`gui/repkger_gui.py`), built by `scripts/make-gui-app.sh`
+  into `build/Repkger.app`. Replaces the old AppleScript droplet (which errored
+  on launch/droplet `argv`). Double-click, Finder drag-drop, and "Open With" all
+  work; drag-dropped `.pkg`/`.dmg`/`.zip`/`.bundle` pre-loads the file list.
+- **`brew link` / `brew unlink`** for casks — writes/removes a Caskroom receipt
+  so rootless installs appear under `brew list --cask <name>` (validated with
+  `gamemaker`).
+- **Homebrew tap formula + cask published** to `ksl-testing/homebrew-tap`:
+  `Formula/repkger.rb` (CLI), `Formula/repkgr.rb` (alias), `Casks/repkger.rb`
+  (GUI). The cask uses a `binary` stanza to symlink the embedded CLI to
+  `$(brew --prefix)/bin/repkger`. Both install cleanly (verified).
+- **`repkger` repo is public** — brew downloads release assets anonymously (no
+  GitHub auth). `tpl-bootkit` private-casks still uses `gh`-authed download as a
+  fallback.
+- **`self-install`** adds `~/bin/repkger` + `brew()`/`brewpkg()`/`rbrew()`/`rpkg()`
+  shims and puts `~/bin` on PATH.
+- Roundtrip **112/112** (no Actions quota — built+published locally via
+  `scripts/release.sh` + `scripts/update-tap.sh`).
 
 ### DONE + validated
 - CLI: `inspect` (+ `--json`, `--show-scripts`, `--files [N]`), `install`,

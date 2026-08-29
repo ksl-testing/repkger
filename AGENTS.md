@@ -95,6 +95,18 @@ Read these before touching the matching areas.
   (e.g. the `self-install` func_block), use `if/elif` chains instead of
   `case … | … )` patterns.
 
+## Brew cask packaging (repkger cask)
+
+- To expose the embedded CLI on PATH from the GUI cask, do NOT use a
+  `postflight` with `Symlink.new(...)` — the cask loader doesn't define
+  `Symlink` and it dies with `uninitialized constant ... Symlink`
+  (`tap/Casks/repkger.rb`). Use the `binary` stanza instead:
+  `binary "#{appdir}/Repkger.app/Contents/Resources/repkger", target: "repkger"`
+  (brew symlinks it into `HOMEBREW_PREFIX/bin` and auto-removes it on uninstall).
+- `repkger` repo is PUBLIC (changed from private on 2026-08-29) so the
+  formula/cask download release assets anonymously — `gh release download` works
+  either way, but plain `brew install` cannot auth, so private assets 404 for brew.
+
 ## Version
 
-- Current: 0.5.1 (bin/repkger `REPKGER_VERSION`). Bump for releases.
+- Current: 0.5.2 (bin/repkger `REPKGER_VERSION`). Bump for releases.
