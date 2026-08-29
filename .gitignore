@@ -1,4 +1,5 @@
 build/
 dist/
+.freebuff/
 .DS_Store
 *.pyc
